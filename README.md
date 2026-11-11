@@ -1,4 +1,4 @@
-# alpamayo2edge
+# alpamayostudent
 
 ## Setup
 

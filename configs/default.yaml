@@ -180,7 +180,7 @@ stage2:
   gate_metric: t0_ade                        # t0_ade | minade
   gate_batch: 8
   wandb: true
-  wandb_project: alpamayo2edge
+  wandb_project: alpamayostudent
   loss_weights:
     flow_distill: 1.0
     fm_gt: 0.5
