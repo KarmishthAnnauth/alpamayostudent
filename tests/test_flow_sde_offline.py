@@ -1,20 +1,4 @@
-"""The SDE sampler behind DiffGRPO, pinned offline (CPU, no model).
-
-Two things have to be true for the policy gradient to mean anything:
-
-  1. the SDE has the ODE's marginals (Flow-GRPO's construction), so sampling
-     with noise a > 0 explores the same distribution the head was trained to
-     produce - checked on a Gaussian toy where the exact velocity field is
-     known in closed form and the marginal variance V(t) can be tracked step
-     by step;
-  2. the density that `step_logprob` differentiates is the density the sample
-     was drawn from - checked by recomputing a recorded chain's per-step
-     log-probs with the same weights and demanding equality.
-
-The suspicion recorded in P2-07 (denominator 2 tau vs 2 (1-tau)) was settled
-2026-09-29: the implemented drift a^2/(2(1-tau)) IS Flow-GRPO's sigma^2/(2 tau)
-with sigma = a sqrt(tau/(1-tau)); the alternative breaks test 1 immediately.
-"""
+"""The SDE sampler behind DiffGRPO, pinned offline (CPU, no model)."""
 import math
 import sys
 from pathlib import Path
@@ -24,7 +8,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from distill.student import flow_path as fp    # noqa: E402
 
-MU, S = 1.5, 0.5     # data ~ N(MU, S^2), noise ~ N(0, 1), teacher convention a_t = t a1 + (1-t) a0
+MU, S = 1.5, 0.5
 
 
 def _u_exact(x, t):
@@ -59,9 +43,7 @@ def test_sde_step_preserves_the_marginal_on_a_gaussian_toy():
 
 
 def test_the_rejected_drift_does_not_preserve_the_marginal():
-    """Guards the derivation: with 2*tau in the denominator (a^2 confused with
-    sigma^2) the variance is 40% off at t = 1. If this ever passes, somebody
-    changed the toy, not the sampler."""
+    """Guards the SDE variance derivation."""
     torch.manual_seed(0)
     n, steps, a, t_start = 200_000, 100, 0.7, 0.2
     a1 = MU + S * torch.randn(n); a0 = torch.randn(n)
@@ -81,8 +63,7 @@ def test_the_rejected_drift_does_not_preserve_the_marginal():
 
 
 def test_sde_from_pure_noise_lands_near_the_data_marginal():
-    """From t = 0 the first step uses the floored noise scale; the Langevin
-    part of the drift pulls the marginal back within a few percent."""
+    """From t = 0 the drift pulls the marginal back within a few percent."""
     torch.manual_seed(1)
     n, steps, a = 300_000, 50, 0.7
     x = torch.randn(n)

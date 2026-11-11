@@ -1,14 +1,4 @@
-"""Where the CoC cross-entropy lives, position by position.
-
-`losses.text_kl_or_ce` is a per-token MEAN of hard-label CE over the teacher's
-one sampled trace. A trace is ~14 tokens; the maneuver decision is the first one
-or two, the rest is template ("... since it is directly ahead in our lane"). If
-the template tokens are near-free, the loss the optimiser sees is dominated by
-positions that carry no decision, and a student can post a tiny `text` loss
-while hedging the maneuver - which is the mode-collapse pattern 05b measures.
-
-Teacher-forced, one forward per batch, no generation. Prints mean CE per CoC
-position and the share of total CE in the first k positions.
+"""Mean CoC cross-entropy per token position.
 
     python scripts/05c_coc_ce_by_position.py --ckpt <dir> --split val --n 200
 """
@@ -77,7 +67,6 @@ def main() -> int:
         ce_sum[:k] += ce[:, :k].sum(0).cpu().double()
         ce_cnt[:k] += ok[:, :k].sum(0).cpu().double()
         tot_sum += float(ce.sum()); tot_cnt += float(ok.sum())
-        # What the first CoC token is, and its CE - the maneuver verb lives here.
         for b in range(tgt.shape[0]):
             if ok[b, 0]:
                 w = student.tokenizer.decode([int(tgt[b, 0])]).strip().lower()

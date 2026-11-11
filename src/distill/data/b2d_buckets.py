@@ -1,30 +1,4 @@
-"""Bucketed sampling of Bench2Drive training windows (phase 2, SFT run 5).
-
-The flow head's remaining error is go/stop timing (PHASE2 memory, run 2-4:
-moving->stop, standing->depart, hard brakes), while a uniform epoch spends a
-quarter of its windows on an ego that never moves. SimLingo's recipe for the
-same problem is to bucket the data by what the expert does and resample
-(acceleration / deceleration buckets, one for starting from stop, steering
-buckets, near-constant-speed samples thinned out). This is that, on the
-quantities our cache already stores.
-
-A window gets ONE bucket, the first that matches (rarest and hardest first):
-
-    standing     v0 < 0.5 m/s and never above 0.5 over the 6.4 s
-    start        v0 < 0.5 m/s, later above 2 m/s          (departure timing)
-    hard_brake   mean accel over the first 2 s < -2.5 m/s^2
-    to_stop      v0 > 1 m/s and standing at 6.4 s          (stop timing)
-    brake        mean accel over the first 2 s < -1 m/s^2
-    turn         lateral offset at 6.4 s > 3 m             (turns, lane changes)
-    accel        mean accel over the first 2 s > +1 m/s^2
-    cruise       everything else
-
-`sampling_weights` turns target shares per bucket (`stage2.buckets.share`) into
-per-window weights for a `WeightedRandomSampler`: an epoch keeps its length and
-draws bucket b with probability share[b], uniformly inside the bucket. The
-validation gate is NOT resampled - it stays the natural mix, so run 5's gate
-compares with runs 1-4.
-"""
+"""Bucketed sampling of Bench2Drive training windows by expert behaviour."""
 from __future__ import annotations
 
 import json
@@ -41,7 +15,7 @@ BUCKET_FILE = "buckets_{split}.json"
 def window_features(gt_future_xyz: np.ndarray, ego_speed_t0: float) -> dict:
     xyz = np.asarray(gt_future_xyz, dtype=np.float64)
     step = np.diff(np.vstack([np.zeros(3), xyz]), axis=0)[:, :2]
-    speed = np.linalg.norm(step, axis=1) / DT                  # (64,) m/s at t0+0.1 .. t0+6.4
+    speed = np.linalg.norm(step, axis=1) / DT
     v0 = float(ego_speed_t0)
     return dict(v0=v0, vmax=float(speed.max()), vend=float(speed[-1]),
                 a2=float((speed[19] - v0) / 2.0), lat=float(abs(xyz[-1, 1])))
@@ -87,9 +61,7 @@ def load(cache_root: Path, split: str = "train") -> dict[str, str]:
 
 
 def sampling_weights(buckets: list[str], share: dict[str, float]) -> np.ndarray:
-    """Per-window weight = share[bucket] / count[bucket], shares renormalised over
-    the buckets that occur. An unknown or missing bucket name raises: a typo in
-    the config would otherwise silently zero a bucket."""
+    """Per-window weight = share[bucket] / count[bucket]."""
     bad = set(share) - set(BUCKETS)
     if bad:
         raise ValueError(f"unknown bucket(s) in stage2.buckets.share: {sorted(bad)}")

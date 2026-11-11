@@ -1,17 +1,4 @@
-"""Phase 2 diagnostic: does the flow head listen to the CoC?
-
-Builds two alternative CoC caches for a split from the EXPERT's own kinematics
-(`gt_reward.kinematics` on `gt_future_xyz`), using the most frequent texts of
-the real cache (`coc_rl7s25.jsonl`) so every line is in-distribution for the
-head:
-
-    oracle  - the text says what the expert did (stop / slow / keep / accelerate,
-              a turn where the expert turned)
-    anti    - the opposite longitudinal class
-
-Evaluating a checkpoint with none / cached / oracle / anti CoC bounds how much
-better conditioning could buy (oracle - cached) and how much the head reads
-the text at all (oracle - anti).
+"""Build oracle / anti CoC caches from expert kinematics to probe whether the flow head reads the CoC.
 
     python scripts/05l_oracle_coc.py --split val --out-dir runs/coc_probe
 """
@@ -32,7 +19,7 @@ from distill.eval import gt_reward                                  # noqa: E402
 
 log = logging.getLogger("oracle_coc")
 
-# Most frequent text per maneuver class in coc_rl7s25.jsonl (all 8,903 windows).
+# Most frequent cached text per maneuver class
 TEXT = {
     "STOP": "Stop for the red traffic light since the signal is red",
     "STOP_LEAD": "Stop to keep distance to the lead vehicle since it is stopped ahead",

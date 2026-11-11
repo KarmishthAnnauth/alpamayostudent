@@ -1,14 +1,6 @@
 #!/usr/bin/env bash
-# Extract the Bench2Drive-Base tarballs in place and DELETE each archive once its
-# extraction has been verified (user instruction 2026-09-28: keeping both copies
-# would double the footprint). /bulk has ~5 TB free, so every modality is kept.
-#
-#     nohup bash scripts/01c_b2d_extract.sh > logs/b2d_extract.log 2>&1 &
-#
-# Per clip: list the archive (file count), extract, count files on disk, and
-# only on an exact match write <clip>/.done and rm the tarball. A mismatch or a
-# missing top-level dir leaves the tarball alone and prints FAIL. Idempotent:
-# clips with .done are skipped, partial dirs are wiped and redone.
+# Extract Bench2Drive-Base tarballs in place, deleting each archive once verified.
+# Usage: nohup bash scripts/01c_b2d_extract.sh > logs/b2d_extract.log 2>&1 &
 set -uo pipefail
 ROOT=/bulk/datasets/bench2drive
 OUT=$ROOT/extracted

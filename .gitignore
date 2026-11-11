@@ -17,8 +17,34 @@ venv/
 /data/
 /outputs/
 /checkpoints/
+/models/
+
+# Local machine paths (copy configs/paths.example.yaml)
+/configs/paths.yaml
 /wandb/
 
 # Editors
 .idea/
 .vscode/
+
+# Scratch / working notes (kept locally, not part of the published repo)
+/tomorrow.txt
+/.last_label_log
+/HANDOFF*.md
+/INSTRUCTIONS.md
+/NEXT_STEPS.md
+/COMPARISON.md
+/PHASE1_RUNBOOK.md
+/eval_phase1.md
+/DECISIONS.md
+/PHASE2_DECISIONS.md
+/TRAINING_STRATEGY.md
+
+# Job logs and eval outputs
+/logs/
+/runs/
+
+# Dev-only scripts
+/scripts/dev_diag_phaseb.py
+/scripts/dev_dummy_label.py
+/scripts/check_cache.py

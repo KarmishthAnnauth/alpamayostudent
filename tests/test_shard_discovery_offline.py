@@ -1,13 +1,4 @@
-"""Shard discovery must not return the student-input files. No GPU.
-
-`frames.save_window_input` writes `{idx:02d}_input.npz` into the same clip
-directory as the teacher targets `{idx:02d}.npz`, and `data.cache_student_frames`
-is on, so every labeled clip directory holds both kinds. A bare `*.npz` glob
-returns both: the dataset length doubles, and `Stage1Dataset.__getitem__` parses
-the window index off the filename, so `int("00_input")` raises before the first
-forward pass. `scripts/check_cache.py` has always partitioned on this suffix;
-these pin that discovery agrees with it.
-"""
+"""Shard discovery must not return the `_input.npz` student-input files."""
 import sys
 from pathlib import Path
 

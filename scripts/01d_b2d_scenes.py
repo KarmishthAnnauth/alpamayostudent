@@ -1,14 +1,6 @@
-"""Build the replay scenes of the Bench2Drive window cache (DiffGRPO reward input).
+"""Build replay scenes for the Bench2Drive window cache.
 
-    python scripts/01d_b2d_scenes.py --limit 5             # 5 clips, timing
-    python scripts/01d_b2d_scenes.py --workers 16          # every clip in the cache
-    python scripts/01d_b2d_scenes.py --clips A,B            # named clips
-
-For every window of every clip in `<cache>/manifest.json` (anchors from
-`<clip>/windows.json`), reads the raw annotations once per clip and writes
-`<clip>/{w:02d}_scene.npz` (distill.data.b2d_scene). CPU only, resumable (an
-existing scene file is skipped). The build self-checks the box/yaw convention
-on every window and fails the clip loudly if it does not hold.
+    python scripts/01d_b2d_scenes.py --workers 16
 """
 from __future__ import annotations
 import argparse
@@ -44,7 +36,7 @@ def _build_clip(args: tuple[str, str, str]) -> dict:
                 sc.save_scene(sc.scene_path(cache_root, clip_id, w_idx), scene)
                 rec["scenes"] += 1
                 rec["actors"] += int(scene["actor_id"].shape[0])
-    except Exception as e:      # one bad clip must not end an unattended run
+    except Exception as e:
         rec["error"] = f"{type(e).__name__}: {e}"
     rec["seconds"] = time.perf_counter() - t_start
     return rec

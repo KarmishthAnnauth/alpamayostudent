@@ -1,16 +1,7 @@
-"""Phase 2, step 2: the CoC on CARLA. Generate it once per Bench2Drive window
-with the phase-2 init (RL run 7 step 25 folded into run-351/best), cache it for
-the flow head to condition on, and score it against the EXPERT's kinematics
-with the same driver-grounded rows 05f uses on PhysicalAI-AV. That table is the
-CARLA-transfer check the plan called for: the CoC was distilled on real footage
-and has never seen a render.
+"""Generate and score the CoC on Bench2Drive windows.
 
-    bash scripts/ada_run.sh scripts/05j_b2d_coc.py generate            # all windows, resumable
-    bash scripts/ada_run.sh scripts/05j_b2d_coc.py generate --n 200    # a look
-    python scripts/05j_b2d_coc.py score [--split val]                  # CPU
-
-Output: `<b2d_cache>/coc_rl7s25.jsonl` (config `stage2.coc_cache`), one row per
-window {clip, window, student, terminated}; `score` reads it back.
+    python scripts/05j_b2d_coc.py generate [--n 200]
+    python scripts/05j_b2d_coc.py score [--split val]
 """
 from __future__ import annotations
 import argparse
@@ -32,8 +23,7 @@ from distill.eval import gt_reward                                  # noqa: E402
 
 log = logging.getLogger("b2d_coc")
 
-# PhysicalAI-AV full-val reference rows (D-058, two draws): what the same
-# checkpoint does on real footage. Printed next to the CARLA numbers.
+# PhysicalAI-AV reference rows (student, teacher)
 REF = {"braked_slow": (0.385, 0.216), "stopped": (0.750, 0.690), "hard": (0.379, 0.165),
        "false_clear": (0.288, 0.190), "consistent": (0.780, 0.691), "nudge": (0.035, 0.099)}
 
@@ -60,8 +50,6 @@ def generate(a, cfg) -> int:
         log.info("resuming: %d windows already in %s", len(done), out_path)
 
     if a.ckpt:
-        # a merged stage-2 checkpoint (AR LoRA folded): what the CoC looks like
-        # AFTER the flow loss touched the reasoner (run 3 drift check)
         from distill.student.edge_wrapper import EdgeStudent
         from distill import checkpoint
         student = EdgeStudent(cfg).cuda()
@@ -71,12 +59,12 @@ def generate(a, cfg) -> int:
         meta = checkpoint.load_into(student, Path(a.ckpt))
         log.info("stage-2 checkpoint %s (epoch=%s)", a.ckpt, meta.get("epoch"))
     else:
-        student = ts2.load_student(cfg)              # init ckpt + RL adapters folded
+        student = ts2.load_student(cfg)
     student.eval()
     root = Path(cfg.paths.b2d_cache_root)
     clip_ids = b2d.load_b2d_split(root, a.split) if a.split else None
     ds = b2d.Bench2DriveDataset(root, student.context_builder(), clip_ids=clip_ids,
-                                coc_lookup=None, for_generation=True)   # free-running prompt
+                                coc_lookup=None, for_generation=True)
     pad_id = student.tokenizer.pad_token_id
     todo = [i for i in range(len(ds))
             if (ds.shards[i].parent.name, int(ds.shards[i].stem)) not in done]
@@ -107,7 +95,7 @@ def generate(a, cfg) -> int:
 
 def score(a, cfg) -> int:
     from distill.eval.coc_score import parse
-    SLOWING = ("STOP", "SLOW", "YIELD")          # 05f's definition
+    SLOWING = ("STOP", "SLOW", "YIELD")
     root = Path(cfg.paths.b2d_cache_root)
     path = Path(a.out or cfg.stage2.coc_cache)
     rows = [json.loads(l) for l in path.read_text().splitlines() if l.strip()]
@@ -120,7 +108,7 @@ def score(a, cfg) -> int:
 
     agg, n_braked, sev_n, sev_slow = [], 0, Counter(), Counter()
     braked_man, all_man = Counter(), Counter()
-    flagged = {"n": 0, "slow": 0}          # expert's own should_brake flag over the horizon
+    flagged = {"n": 0, "slow": 0}
     by_scn = {}
     for r in rows:
         with np.load(root / r["clip"] / f"{int(r['window']):02d}.npz", allow_pickle=True) as z:

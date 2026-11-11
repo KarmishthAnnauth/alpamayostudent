@@ -1,90 +1,4 @@
-"""Bench2Drive clips -> training windows in the student pipeline's own schema.
-
-Phase 2 trains the flow head on closed-loop CARLA data (Bench2Drive is the eval
-target; PhysicalAI-AV minADE is only a proxy). This module turns ONE extracted
-Bench2Drive clip into windows shaped exactly like the PhysicalAI-AV windows the
-student already consumes, so `student/context.py`, `data/frames.py` and the
-stage-2 collators need no change:
-
-    window.frames_student   {config camera slot: (F, h, w, 3) uint8 RGB}
-    window.data             ego_history_xyz (1,1,16,3), ego_history_rot (1,1,16,3,3),
-                            ego_future_xyz  (1,1,64,3), ego_future_rot  (1,1,64,3,3)
-    window.gt_future_xyz    (64, 3) fp32 ego frame at t0     (eval minADE reference)
-    window.gt_traj          (64, 2) fp32 UnicycleAccelCurvature, z-normalised (D-002)
-    + Bench2Drive labels    should_brake (any future frame; the flag is set on ~70-95%
-                            of frames in most scenarios, so also should_brake_frac),
-                            expert_controls (64x3 throttle/steer/brake), ego_speed_t0,
-                            route command + hint, scenario/town/route/weather,
-                            action_floor_m (the action space's own round-trip error
-                            at 6.4 s on this window - a floor under any minADE),
-                            gt_traj_token_ids (128, emission order) when the teacher's
-                            tokenizer spec is available
-
-On disk the layout is the labeler's: `<cache>/<clip>/{w:02d}.npz` targets next to
-`{w:02d}_input.npz` (JPEG frames + ego history, `frames.save_window_input`),
-`manifest.json` + `split_*.json` at the root, so `dataset.discover_shards` and
-`frames.load_window_input` read it unchanged.
-
-CLIP LAYOUT (verified on the extracted set, 2026-09-28): `anno/NNNNN.json.gz` per
-frame at 10 Hz and `camera/rgb_{front,front_left,front_right,...}/NNNNN.jpg` at
-1600x900. The ego pose comes from the `ego_vehicle` entry of `bounding_boxes`
-(`world2ego`, a rigid 4x4), NOT the top-level x/y, which are off by up to 2.6 m.
-
-FRAMES. CARLA is LEFT-handed: x forward, y RIGHT, z up. The teacher/student ego
-frame is x forward, +y LEFT (D-038: "turn left" labels have median end bearing
-+36 deg). Poses are expressed relative to the anchor pose in CARLA's frame and
-then reflected with S = diag(1, -1, 1): p' = S p, R' = S R S. A positive CARLA
-`steer` is a RIGHT turn, so after the flip it must show as NEGATIVE y and a
-negative yaw; `tests/test_bench2drive_offline.py` pins that on real data.
-
-WINDOW. Anchor t0 with 16 history steps (t0-15..t0) and 64 future steps
-(t0+1..t0+64) at 10 Hz, mirroring `alpamayo1_5.load_physical_aiavdataset`
-(D-002: 64 waypoints, dt 0.1 s). Student frames: `context_frames` per camera at
-[t0-0.3 s, ..., t0], the same spacing as the teacher loader. Anchors are every
-`stride` frames (default 20 = 2 s).
-
-CAMERAS. The four config slots map onto CARLA cameras as
-    camera_cross_left_120fov   <- rgb_front_left        (CARLA: 70 deg FOV, yawed -55 deg)
-    camera_front_wide_120fov   <- rgb_front             (70 deg)
-    camera_cross_right_120fov  <- rgb_front_right       (70 deg, +55 deg)
-    camera_front_tele_30fov    <- centre crop of rgb_front with a 30 deg horizontal
-                                  FOV: half-width f*tan(15 deg) = 306 px at
-                                  f = 1142.5, so x in [494, 1106], 16:9 -> 344 rows
-                                  centred on cy = 450, then resized to student res.
-The slots keep the config names so `context.py` orders and labels them as before;
-the raw camera name is kept in the window metadata (`raw_cameras`).
-
-ROUTE HINT. `command_near` / `command_far` are CARLA leaderboard RoadOptions
-(1 LEFT, 2 RIGHT, 3 STRAIGHT, 4 LANEFOLLOW, 5 CHANGELANELEFT, 6 CHANGELANERIGHT).
-They map onto the existing route vocabulary (`eval/gt_reward.route_hint`: "Turn
-left ahead" / "Turn right ahead" / "Continue straight"); there is no lane-change
-string in that vocabulary (gt_reward: "There is NO lane-change class in the
-route"), so 5/6 read "Continue straight" and the raw command is stored alongside.
-
-Which command? Measured on the extracted clips: the near target sits 1-7 m ahead
-on EVERY frame (median 3.7 m) - it is the next dense route waypoint - so the
-"near unless the near target is < 5 m, else far" rule degenerates to "always
-far", and `command_far` already reads LANEFOLLOW while the ego is mid-turn
-(HighwayExit Route291 frame 50: near=LEFT, far=LANEFOLLOW, steer -0.2).
-`command_near` is the road option of the segment the ego is ON, so the default
-rule (`route_rule="horizon"`) is: the first `command_near` other than
-LANEFOLLOW/VOID inside the window's own horizon [t0, t0+64], else the near
-command at t0. The spec's rule is kept as `route_rule="near_far"` with its
-threshold, and every shard stores `command_near_t0`, `command_far_t0`, the
-chosen `command`, and `route_hint_kin` (the phase-1 hint recomputed from the
-future path with `data/grounding.route_hint`) so the two can be compared.
-
-REFERENCE POINT. CARLA's actor origin sits mid-body, and a mid-body point slips
-relative to the heading in a turn (yaw leads the travel direction by 6-15 deg on
-the turning clips). The unicycle action space assumes the velocity is ALONG the
-heading, which holds at the rear axle - NVIDIA's rig origin, where the cached
-PhysicalAI-AV windows round-trip through `traj_to_action`/`action_to_traj` at
-0.002-0.24 m over 6.4 s, against ~1 m for the raw CARLA origin. The ego frame
-is therefore moved back along the body axis by `REAR_AXLE_OFFSET_M` = 1.25 m,
-the value that minimises |yaw - travel direction| over 8 turning clips (0.41 deg
-residual; 3.0 deg at 0 m; the ego is `vehicle.lincoln.mkz_2020` on every clip,
-wheelbase 2.85 m). Cameras are unaffected: their extrinsics are never used.
-"""
+"""Bench2Drive clips -> training windows in the student pipeline's own schema."""
 from __future__ import annotations
 
 import dataclasses
@@ -101,16 +15,14 @@ import numpy as np
 
 log = logging.getLogger(__name__)
 
-# ---- constants -------------------------------------------------------------
-
-N_HISTORY = 16              # history steps incl. t0 (A1.5 loader default)
-N_FUTURE = 64               # future steps (D-002)
-DT = 0.1                    # s; Bench2Drive is 10 Hz, same as the trajectory grid
+N_HISTORY = 16
+N_FUTURE = 64
+DT = 0.1
 FPS = 10
-DEFAULT_STRIDE = 20         # frames between anchors (2 s)
+DEFAULT_STRIDE = 20
 
 IMG_W, IMG_H = 1600, 900
-FOCAL_PX = 1142.5184053936916   # rgb_front intrinsic (70 deg FOV at 1600 px)
+FOCAL_PX = 1142.5184053936916
 CX, CY = 800.0, 450.0
 TELE_FOV_DEG = 30.0
 
@@ -119,7 +31,6 @@ DEFAULT_CACHE = Path("/bulk/users/vla/alpamayo2edge/b2d_cache")
 DEFAULT_TEACHER_REPO = Path("/bulk/users/vla/alpamayo2edge/teacher-model")
 
 TELE_SLOT = "camera_front_tele_30fov"
-#: config camera slot -> CARLA camera directory. The tele slot is a crop of front.
 RAW_CAMERA = {
     "camera_cross_left_120fov": "rgb_front_left",
     "camera_front_wide_120fov": "rgb_front",
@@ -131,8 +42,6 @@ ROAD_OPTION = {-1: "VOID", 1: "LEFT", 2: "RIGHT", 3: "STRAIGHT", 4: "LANEFOLLOW"
                5: "CHANGELANELEFT", 6: "CHANGELANERIGHT"}
 LANEFOLLOW = 4
 
-#: Release normalisation of the teacher's action space (config.json of
-#: nvidia/Alpamayo-1.5-10B, `action_space_cfg`). D-002: use verbatim.
 RELEASE_ACTION_SPACE = dict(
     n_waypoints=64, dt=0.1,
     accel_mean=0.02902694707164455, accel_std=0.6810426736454882,
@@ -142,18 +51,13 @@ RELEASE_ACTION_SPACE = dict(
     a_lambda=1e-4, a_ridge=1e-4, kappa_lambda=1e-4, kappa_ridge=1e-4,
 )
 
-#: CARLA (x fwd, y right, z up; left-handed) -> ego (x fwd, y LEFT, z up).
-CARLA_TO_EGO = np.diag([1.0, -1.0, 1.0])
+CARLA_TO_EGO = np.diag([1.0, -1.0, 1.0])   # CARLA y-right -> ego y-left
 
-#: Ego origin = actor origin moved back along the body x axis by this much
-#: (rear axle, see the module docstring). Fitted on data, not read from CARLA.
-REAR_AXLE_OFFSET_M = 1.25
+REAR_AXLE_OFFSET_M = 1.25   # ego origin moved back to the rear axle
 
 _CLIP_RE = re.compile(r"^(?P<scenario>[A-Za-z0-9]+)_(?P<town>Town\d+[A-Za-z]*)"
                       r"_Route(?P<route>\d+)_Weather(?P<weather>\d+)$")
 
-
-# ---- clip metadata ---------------------------------------------------------
 
 @dataclasses.dataclass(frozen=True)
 class ClipMeta:
@@ -165,7 +69,7 @@ class ClipMeta:
 
     @property
     def route_key(self) -> str:
-        """Split unit: a route in a town. Weather variants of one route stay together."""
+        """Split unit: a route in a town."""
         return f"{self.town}/Route{self.route}"
 
 
@@ -178,8 +82,7 @@ def parse_clip_id(clip_id: str) -> ClipMeta:
 
 
 def is_done(clip_dir: Path) -> bool:
-    """Only clips whose extraction was verified (`.done`) are safe to read: the
-    extraction job deletes tarballs as it goes and partial dirs get wiped."""
+    """True if the clip's extraction was verified."""
     return (Path(clip_dir) / ".done").is_file()
 
 
@@ -188,27 +91,24 @@ def list_done_clips(root: Path = DEFAULT_ROOT) -> list[Path]:
     return sorted(p for p in root.iterdir() if p.is_dir() and is_done(p))
 
 
-# ---- annotations -----------------------------------------------------------
-
 @dataclasses.dataclass
 class ClipAnno:
     meta: ClipMeta
     clip_dir: Path
-    n: int                          # usable frames (anno AND every raw camera)
-    world2ego: np.ndarray           # (n, 4, 4) f64, CARLA world -> CARLA ego at the
-                                    # REAR AXLE (actor origin shifted back, see doc)
-    location: np.ndarray            # (n, 3) f64 CARLA world, raw actor origin
-    speed: np.ndarray               # (n,) m/s
-    throttle: np.ndarray            # (n,)
-    steer: np.ndarray               # (n,)  CARLA: + = right
-    brake: np.ndarray               # (n,)
-    command_near: np.ndarray        # (n,) int RoadOption
-    command_far: np.ndarray         # (n,) int
-    next_command: np.ndarray        # (n,) int
-    xy_command_near: np.ndarray     # (n, 2) world
-    xy_command_far: np.ndarray      # (n, 2) world
-    should_brake: np.ndarray        # (n,) bool
-    weather: dict                   # frame-0 weather dict
+    n: int
+    world2ego: np.ndarray
+    location: np.ndarray
+    speed: np.ndarray
+    throttle: np.ndarray
+    steer: np.ndarray
+    brake: np.ndarray
+    command_near: np.ndarray
+    command_far: np.ndarray
+    next_command: np.ndarray
+    xy_command_near: np.ndarray
+    xy_command_far: np.ndarray
+    should_brake: np.ndarray
+    weather: dict
 
     def dist_to_near_target(self, k: int) -> float:
         return float(np.hypot(*(self.xy_command_near[k] - self.location[k, :2])))
@@ -264,14 +164,10 @@ def load_clip_anno(clip_dir: Path, cameras: list[str] | None = None,
         if k == 0:
             weather = dict(d.get("weather", {}))
     arrays = {k: np.asarray(v) for k, v in cols.items()}
-    # Rear-axle ego frame: a point at body coords (-l, 0, 0) becomes the origin,
-    # so p_ego' = p_ego + (l, 0, 0)  =>  world2ego' = Trans(l, 0, 0) @ world2ego.
     shift = np.eye(4); shift[0, 3] = float(rear_axle_offset_m)
     arrays["world2ego"] = shift[None] @ arrays["world2ego"]
     return ClipAnno(meta=meta, clip_dir=clip_dir, n=n, weather=weather, **arrays)
 
-
-# ---- geometry --------------------------------------------------------------
 
 def anchor_frames(n_frames: int, stride: int = DEFAULT_STRIDE,
                   n_history: int = N_HISTORY, n_future: int = N_FUTURE) -> list[int]:
@@ -281,17 +177,12 @@ def anchor_frames(n_frames: int, stride: int = DEFAULT_STRIDE,
 
 def relative_poses(world2ego: np.ndarray, t0: int, frames: np.ndarray
                    ) -> tuple[np.ndarray, np.ndarray]:
-    """Poses of `frames` in the STUDENT ego frame at t0.
-
-    Returns `(xyz (k,3), rot (k,3,3))`, float64. The frame at t0 maps to the
-    origin with the identity rotation, which is what `traj_to_action` assumes
-    of `traj_history_xyz[..., -1, :]`.
-    """
-    w0 = world2ego[t0]                                   # world -> ego_t0
-    ego2world = np.linalg.inv(world2ego[frames])         # ego_k -> world
-    T = w0[None] @ ego2world                             # ego_k -> ego_t0, CARLA frame
+    """Poses of `frames` in the STUDENT ego frame at t0."""
+    w0 = world2ego[t0]
+    ego2world = np.linalg.inv(world2ego[frames])
+    T = w0[None] @ ego2world
     S = CARLA_TO_EGO
-    xyz = T[:, :3, 3] @ S                                # S symmetric: p' = S p
+    xyz = T[:, :3, 3] @ S
     rot = S[None] @ T[:, :3, :3] @ S[None]
     return xyz, rot
 
@@ -304,8 +195,7 @@ def yaw_of(rot: np.ndarray) -> np.ndarray:
 def tele_crop_box(f_px: float = FOCAL_PX, fov_deg: float = TELE_FOV_DEG,
                   w: int = IMG_W, h: int = IMG_H, cx: float = CX, cy: float = CY
                   ) -> tuple[int, int, int, int]:
-    """`(x0, y0, x1, y1)` of the 30-deg-FOV centre crop of the front camera,
-    keeping the source aspect (16:9 at 1600x900)."""
+    """`(x0, y0, x1, y1)` of the 30-deg-FOV centre crop of the front camera."""
     half_w = f_px * math.tan(math.radians(fov_deg / 2.0))
     crop_w = int(round(2 * half_w))
     crop_h = int(round(crop_w * h / w))
@@ -313,28 +203,13 @@ def tele_crop_box(f_px: float = FOCAL_PX, fov_deg: float = TELE_FOV_DEG,
     return x0, y0, x0 + crop_w, y0 + crop_h
 
 
-# ---- action space ----------------------------------------------------------
-
 NORM_KEYS = ("accel_mean", "accel_std", "curvature_mean", "curvature_std")
 ACTION_SPACE_FILE = "action_space.json"
 
 
 def load_action_space(teacher_repo: Path | None = DEFAULT_TEACHER_REPO,
                       stats: dict | None = None):
-    """The teacher's `UnicycleAccelCurvatureActionSpace` with release stats.
-
-    Reads `action_space_cfg` from the local teacher config when it exists and
-    checks it against `RELEASE_ACTION_SPACE`; a mismatch raises, because a
-    silently re-estimated normalisation would put `gt_traj` in a different
-    space from every cached teacher target.
-
-    `stats` (phase 2, TODO T1 / SFT run 2): override of the four normalisation
-    constants with Bench2Drive's own statistics for the domain-31 head. Only
-    the affine (mean, std) changes; bounds, dt and the fit lambdas stay the
-    teacher's, so `action_to_traj` gives the same metres for the same physical
-    controls. A cache built this way carries the constants in
-    `<cache>/action_space.json` - read it back with `load_cache_action_space`.
-    """
+    """The teacher's `UnicycleAccelCurvatureActionSpace` with release stats."""
     from alpamayo1_5.action_space.unicycle_accel_curvature import (
         UnicycleAccelCurvatureActionSpace)
     kw = dict(RELEASE_ACTION_SPACE)
@@ -361,8 +236,7 @@ def load_action_space(teacher_repo: Path | None = DEFAULT_TEACHER_REPO,
 
 
 def load_cache_action_space(cache_root: Path | None, teacher_repo: Path | None = DEFAULT_TEACHER_REPO):
-    """The action space a cache was built with: `<cache>/action_space.json` when
-    the builder wrote one (re-normalised caches), else the teacher's release space."""
+    """The action space a cache was built with, else the teacher's release space."""
     if cache_root is not None:
         f = Path(cache_root) / ACTION_SPACE_FILE
         if f.exists():
@@ -372,8 +246,7 @@ def load_cache_action_space(cache_root: Path | None, teacher_repo: Path | None =
 
 
 def traj_to_action(action_space, data: dict) -> np.ndarray:
-    """GT future -> (64, 2) normalised (accel, curvature), the labeler's call
-    (`teacher/wrapper.py::label_window`) on the same 4-D tensors."""
+    """GT future -> (64, 2) normalised (accel, curvature)."""
     a = action_space.traj_to_action(
         traj_history_xyz=data["ego_history_xyz"],
         traj_history_rot=data["ego_history_rot"],
@@ -393,8 +266,6 @@ def action_to_traj(action_space, gt_traj: np.ndarray, data: dict) -> np.ndarray:
     return xyz[0, 0].cpu().numpy()
 
 
-# ---- route hint ------------------------------------------------------------
-
 def _hint_strings() -> dict[str, str]:
     from ..eval import gt_reward
     return {lat: gt_reward.route_hint({"lateral": lat})
@@ -408,12 +279,12 @@ def route_hint_text(command: int) -> str:
         return s["turn_left"]
     if command == 2:
         return s["turn_right"]
-    return s["straight"]        # STRAIGHT, LANEFOLLOW, lane changes, VOID
+    return s["straight"]
 
 
 def route_command(anno: ClipAnno, t0: int, rule: str = "horizon",
                   near_min_m: float = 5.0, horizon: int = N_FUTURE) -> int:
-    """The RoadOption that applies to the window. See the module docstring."""
+    """The RoadOption that applies to the window."""
     if rule == "horizon":
         hi = min(anno.n, t0 + horizon + 1)
         for c in anno.command_near[t0:hi]:
@@ -426,8 +297,6 @@ def route_command(anno: ClipAnno, t0: int, rule: str = "horizon",
         return int(anno.command_near[t0])
     raise ValueError(f"unknown route_rule {rule!r}")
 
-
-# ---- windows ---------------------------------------------------------------
 
 @dataclasses.dataclass
 class WindowParams:
@@ -458,21 +327,19 @@ class WindowParams:
 
 @dataclasses.dataclass
 class B2DWindow:
-    """Duck-compatible with `preprocess.Window` for the context builder and the
-    frame cache (`.frames_student`, `.data[ego_history_*]`, `.clip_id`)."""
+    """Window-shaped Bench2Drive sample."""
     clip_id: str
     anchor_frame: int
     t0_us: int
-    frames_student: dict[str, np.ndarray]     # slot -> (F, h, w, 3) uint8 RGB
-    data: dict[str, Any]                      # 4-D torch tensors, A1.5 layout
-    gt_future_xyz: np.ndarray                 # (64, 3) f32
-    gt_future_rot: np.ndarray                 # (64, 3, 3) f32
-    gt_traj: np.ndarray                       # (64, 2) f32 normalised action
-    should_brake: bool                        # any over the future (set on ~85% of
-                                              # frames in these scenarios - near-constant)
-    should_brake_frac: float                  # fraction of future frames flagged
+    frames_student: dict[str, np.ndarray]
+    data: dict[str, Any]
+    gt_future_xyz: np.ndarray
+    gt_future_rot: np.ndarray
+    gt_traj: np.ndarray
+    should_brake: bool
+    should_brake_frac: float
     should_brake_t0: bool
-    expert_controls: np.ndarray               # (64, 3) throttle/steer/brake at t0..t0+63
+    expert_controls: np.ndarray
     ego_speed_t0: float
     command: int
     command_near_t0: int
@@ -482,9 +349,8 @@ class B2DWindow:
     meta: ClipMeta
     weather: dict
     raw_cameras: dict[str, str]
-    action_floor_m: float                     # |action_to_traj(gt_traj) - future| at 6.4 s:
-                                              # the action space's own floor on this window
-    gt_traj_token_ids: np.ndarray | None = None   # (128,) emission order, optional
+    action_floor_m: float
+    gt_traj_token_ids: np.ndarray | None = None
 
 
 class _FrameReader:
@@ -504,7 +370,7 @@ class _FrameReader:
             img = cv2.imread(str(path), cv2.IMREAD_COLOR)
             if img is None:
                 raise RuntimeError(f"JPEG decode failed: {path}")
-            self._raw[key] = np.ascontiguousarray(img[:, :, ::-1])   # BGR -> RGB
+            self._raw[key] = np.ascontiguousarray(img[:, :, ::-1])
         return self._raw[key]
 
     def student(self, slot: str, k: int) -> np.ndarray:
@@ -533,7 +399,6 @@ def build_window(anno: ClipAnno, t0: int, params: WindowParams, action_space,
     fut_idx = np.arange(t0 + 1, t0 + N_FUTURE + 1)
     h_xyz, h_rot = relative_poses(anno.world2ego, t0, hist_idx)
     f_xyz, f_rot = relative_poses(anno.world2ego, t0, fut_idx)
-    # t0 is the origin by construction; pin it exactly (traj_to_action assumes it).
     h_xyz[-1] = 0.0; h_rot[-1] = np.eye(3)
     data = {
         "ego_history_xyz": torch.from_numpy(h_xyz).float().view(1, 1, N_HISTORY, 3),
@@ -549,7 +414,6 @@ def build_window(anno: ClipAnno, t0: int, params: WindowParams, action_space,
     tokens = None
     if tokenizer_fn is not None:
         from ..teacher.wrapper import swap_action_dims
-        # Exactly the labeler's call, then to EMISSION order (D-031).
         tok = tokenizer_fn(hist_xyz=data["ego_history_xyz"][:, -1],
                            hist_rot=data["ego_history_rot"][:, -1],
                            fut_xyz=data["ego_future_xyz"][:, -1],
@@ -559,13 +423,12 @@ def build_window(anno: ClipAnno, t0: int, params: WindowParams, action_space,
     frames: dict[str, np.ndarray] = {}
     if with_frames:
         reader = reader or _FrameReader(anno.clip_dir, params)
-        # Same spacing as the teacher loader: [t0-(F-1), ..., t0] at 0.1 s.
         ks = [t0 - (params.n_frames - 1 - i) for i in range(params.n_frames)]
         for slot in params.cameras:
             frames[slot] = np.stack([reader.student(slot, k) for k in ks])
 
     cmd = route_command(anno, t0, params.route_rule, params.near_min_m)
-    ctrl_idx = np.arange(t0, t0 + N_FUTURE)     # control at step i -> waypoint i+1
+    ctrl_idx = np.arange(t0, t0 + N_FUTURE)
     return B2DWindow(
         clip_id=anno.meta.clip_id, anchor_frame=int(t0), t0_us=int(t0 * 100_000),
         frames_student=frames, data=data,
@@ -603,15 +466,13 @@ def iter_clip_windows(anno: ClipAnno, params: WindowParams, action_space,
             reader.clear()
 
 
-# ---- cache -----------------------------------------------------------------
-
 def targets_path(cache_root: Path, clip_id: str, w_idx: int) -> Path:
     return Path(cache_root) / clip_id / f"{w_idx:02d}.npz"
 
 
 def save_window(cache_root: Path, w_idx: int, window: B2DWindow,
                 quality: int = 92) -> tuple[Path, Path]:
-    """Targets shard + student input, the labeler's two files (atomic writes)."""
+    """Write the targets shard and student input for one window."""
     from ..teacher.labeler import atomic_savez
     from . import frames as frames_mod
 
@@ -650,7 +511,7 @@ def save_window(cache_root: Path, w_idx: int, window: B2DWindow,
 
 
 def window_record(w_idx: int, window: B2DWindow) -> dict:
-    """Small per-window row for `<clip>/windows.json` (summaries without npz reads)."""
+    """Small per-window row for `<clip>/windows.json`."""
     return dict(idx=w_idx, anchor_frame=window.anchor_frame, command=window.command,
                 command_near_t0=window.command_near_t0, command_far_t0=window.command_far_t0,
                 route_hint=window.route_hint, route_hint_kin=window.route_hint_kin,
@@ -665,17 +526,8 @@ def load_targets(path: Path) -> dict:
         return {k: z[k] for k in z.files}
 
 
-# ---- splits ----------------------------------------------------------------
-
 def make_splits(clip_ids: list[str], val_fraction: float = 0.10, seed: int = 0) -> dict:
-    """Train/val by ROUTE (and town), stratified by scenario.
-
-    Every clip of a route (all weathers) lands on one side, so no val route is
-    ever seen in training. Per scenario the routes are ranked by a seeded hash
-    and the top ~`val_fraction` (at least one when the scenario has >= 2 routes)
-    are held out. Deterministic in `(seed, route)`; adding clips re-ranks only
-    within their scenario.
-    """
+    """Train/val by ROUTE (and town), stratified by scenario."""
     metas = [parse_clip_id(c) for c in clip_ids]
     by_scn: dict[str, dict[str, list[str]]] = {}
     for m in metas:
@@ -708,9 +560,7 @@ def make_splits(clip_ids: list[str], val_fraction: float = 0.10, seed: int = 0) 
 
 def write_splits(cache_root: Path, clip_ids: list[str], val_fraction: float = 0.10,
                  seed: int = 0) -> dict:
-    """`splits.json` (the full record), plus `manifest.json` and
-    `split_train.json` / `split_val.json` in the labeler's formats so
-    `dataset.discover_shards` and `splits.load_split` work on this cache."""
+    """Write splits.json, manifest.json and split_*.json for the cache."""
     root = Path(cache_root)
     root.mkdir(parents=True, exist_ok=True)
     sp = make_splits(clip_ids, val_fraction, seed)
@@ -722,41 +572,8 @@ def write_splits(cache_root: Path, clip_ids: list[str], val_fraction: float = 0.
     return sp
 
 
-# ---- dataset ---------------------------------------------------------------
-
 class Bench2DriveDataset:
-    """Bench2Drive windows through the student's context builder.
-
-    Mirrors `dataset.Stage1Dataset.__getitem__` for everything a flow-head
-    trainer touches (`student` context, `gt_traj`, `gt_future_xyz`, `hist_xyz`,
-    `hist_rot`, `route_hint`, `img_drop`) and adds the Bench2Drive fields. It is
-    NOT a teacher cache: there is no CoC text, no teacher token stream and no
-    cached expert velocities. Consequences, each a constructor knob:
-
-      coc_lookup        `(clip_id, w_idx) -> str | None`. None (default) builds
-                        the free-running prompt (assistant opens `<|cot_start|>`,
-                        like `cot_generation`); a string is teacher-forced and
-                        the sequence stops at `<|traj_future_start|>` when
-                        `for_generation` (the expert's conditioning point) or
-                        carries the GT bins otherwise.
-      traj_prefix       "gt" puts `gt_traj_token_ids` (present when the cache
-                        was built with the tokenizer spec) in the sequence when
-                        not `for_generation`; None leaves the bins out.
-      n_flow_samples    K > 0 synthesises `(flow_t, flow_a_t, flow_v)` from the
-                        GT action in the teacher's convention (D-012: a_t = t a1 +
-                        (1-t) a0, v = a1 - a0, t ~ U[0, t_max) stratified) so
-                        `collate_b2d` yields what `train_stage2` reads under
-                        `stage2.supervision: gt_flow`. There is no `flow_v` from
-                        a teacher here, so `teacher_flow` has nothing to distil.
-      route_source      "command" (Bench2Drive navigation, deployment-faithful) or
-                        "kinematic" (phase-1's hint from the future path).
-      with_scene        load `<clip>/{w:02d}_scene.npz` (data/b2d_scene.py, built
-                        by scripts/01d_b2d_scenes.py) into item["scene"] for the
-                        DiffGRPO replay reward; missing scenes raise.
-
-    Use `collate_b2d`, not `collate_stage2`: the stage-1 collator pads teacher
-    keys this cache does not have.
-    """
+    """Bench2Drive windows through the student's context builder."""
 
     def __init__(self, cache_root: Path, context_builder, clip_ids: list[str] | None = None,
                  route_source: str = "command", route_hint: bool = True,
@@ -790,7 +607,6 @@ class Bench2DriveDataset:
     def _flow_samples(self, a1):
         import torch
         k = self.n_flow_samples
-        # Stratified uniform over [0, t_max), the labeler's `uniform` setting.
         edges = torch.arange(k, dtype=torch.float32) / k
         t = (edges + torch.rand(k) / k) * self.flow_t_max
         a1 = torch.as_tensor(a1, dtype=torch.float32).unsqueeze(0).expand(k, -1, -1)
@@ -837,10 +653,7 @@ class Bench2DriveDataset:
 
 
 def collate_b2d(batch: list[dict], pad_id: int) -> dict:
-    """Stage-2-shaped batch from Bench2Drive items: the student context (padded
-    like `collate_student`), GT targets, ego history, metadata, and - when the
-    dataset synthesised them - the flattened flow tuples in `collate_stage2`'s
-    layout (`flow_owner` maps each tuple to its window)."""
+    """Collate Bench2Drive items into a stage-2-shaped batch."""
     import torch
     from .dataset import collate_student
 
@@ -860,12 +673,10 @@ def collate_b2d(batch: list[dict], pad_id: int) -> dict:
         town=[str(b["town"]) for b in batch],
     )
     if all("scene" in b for b in batch):
-        out["scene"] = [b["scene"] for b in batch]        # list of numpy dicts, one per window
+        out["scene"] = [b["scene"] for b in batch]
     if all("gt_traj_token_ids" in b for b in batch):
         tok = torch.stack([torch.as_tensor(b["gt_traj_token_ids"], dtype=torch.long)
                            for b in batch])
-        # The only trajectory token stream this cache has; `train_stage2` reads
-        # `traj` for its scheduled-sampling swap and `gt_traj_tok` for gt_ce.
         out.update(gt_traj_tok=tok, traj=tok.clone(),
                    traj_mask=torch.ones_like(tok, dtype=torch.bool))
     if all("flow_t" in b for b in batch):
@@ -881,11 +692,8 @@ def collate_b2d(batch: list[dict], pad_id: int) -> dict:
     return out
 
 
-# ---- summary ---------------------------------------------------------------
-
 def summarize(cache_root: Path) -> dict:
-    """Windows per scenario / town, braking fraction, route-hint agreement,
-    from the per-clip `windows.json` rows (falls back to the npz shards)."""
+    """Summary stats of a Bench2Drive cache."""
     root = Path(cache_root)
     rows: list[dict] = []
     for clip_dir in sorted(p for p in root.iterdir() if p.is_dir()):
@@ -932,12 +740,8 @@ def summarize(cache_root: Path) -> dict:
             "route_hint_agree_frac": agree / max(n, 1), "commands": cmds}
 
 
-# ---------------------------------------------------------------- phase-2 glue --
-
 def load_coc_cache(path) -> dict[tuple[str, int], str]:
-    """`scripts/05j_b2d_coc.py generate` output -> {(clip_id, w_idx): coc_text}.
-    Rows whose generation did not terminate are kept (the text is what the
-    model said); empty rows are dropped so the lookup falls back to None."""
+    """CoC generation output -> {(clip_id, w_idx): coc_text}."""
     import json
     out: dict[tuple[str, int], str] = {}
     for line in Path(path).read_text().splitlines():
@@ -951,7 +755,7 @@ def load_coc_cache(path) -> dict[tuple[str, int], str]:
 
 
 def coc_lookup_from_cache(path):
-    """Constructor knob for `Bench2DriveDataset(coc_lookup=...)` (None -> free-running)."""
+    """Build the `coc_lookup` for `Bench2DriveDataset`."""
     if path is None:
         return None
     table = load_coc_cache(path)
@@ -959,8 +763,7 @@ def coc_lookup_from_cache(path):
 
 
 def load_b2d_split(cache_root, name: str) -> list[str]:
-    """Clip ids of `split_<name>.json` under the Bench2Drive cache (written by
-    `write_splits`; same list format as the labeler's split files)."""
+    """Clip ids of `split_<name>.json` under the Bench2Drive cache."""
     import json
     p = Path(cache_root) / f"split_{name}.json"
     if not p.exists():

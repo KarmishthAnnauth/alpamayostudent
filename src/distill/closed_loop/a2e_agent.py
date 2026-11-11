@@ -1,27 +1,4 @@
-"""Closed-loop Bench2Drive agent for the stage-2 student (flow head + CoC).
-
-A leaderboard `AutonomousAgent` in the mould of the Bench2DriveZoo agents
-(`team_code/orion_b2d_agent.py`, the thesis' `qwen3vl_b2d_agent.py`): same
-camera rig, same GNSS/IMU/speedometer, same PID. It holds no model. Each plan it
-assembles the window the flow head was trained on (`a2e_common.py`) and asks
-`server.py` for a trajectory; see that module for why.
-
-    --agent        src/distill/closed_loop/a2e_agent.py
-    --agent-config <unix socket of the model server>      (the evaluator appends +<save_name>)
-
-Slow-fast split (PHASE2_DECISIONS T3), both in sim time so a slow model only
-lowers the sim/wallclock ratio (CARLA is synchronous):
-
-    A2E_PLAN_EVERY   ticks between flow-head plans (default 2 = 10 Hz, the data
-                     rate). Between plans the last trajectory is followed,
-                     re-expressed in the current ego frame.
-    A2E_COC_EVERY_S  seconds between CoC refreshes (default 2.0); in between the
-                     previous CoC text is handed back as conditioning.
-    A2E_HINT_MIN_M   floor of the route-hint lookahead (default 5 m); the
-                     lookahead itself is speed x 6.4 s, the window's horizon.
-    SAVE_PATH        debug output root: <SAVE_PATH>/<save_name>/{meta/NNNN.json,
-                     metric_info.json[, rgb_front/NNNN.jpg with A2E_SAVE_RGB=1]}
-"""
+"""Closed-loop Bench2Drive agent that queries the stage-2 student via a model server."""
 from __future__ import annotations
 
 import json
@@ -90,11 +67,7 @@ class A2EAgent(autonomous_agent.AutonomousAgent):
                 (self.save_path / "rgb_front").mkdir(exist_ok=True)
 
     def _init(self):
-        # The map's geo-reference from the first route point, known in both
-        # frames; then the DENSE plan (1 m, `_plan_gps_HACK`) in world metres.
-        # Dense, not the 50 m keypoints of `_global_plan`: the dataset's
-        # `command_near` is the road option of the segment the ego is on (near
-        # target 1-7 m ahead, bench2drive.py), which only a dense route gives.
+        # Geo-reference from the first route point, then the dense route.
         loc = self._global_plan_world_coord[0][0].location
         g0 = self._global_plan[0][0]
         self.lat_ref, self.lon_ref = cm.solve_latlon_ref(g0["lat"], g0["lon"], loc.x, loc.y)
@@ -118,8 +91,6 @@ class A2EAgent(autonomous_agent.AutonomousAgent):
             dict(type="sensor.speedometer", id="SPEED", reading_frequency=cm.SIM_HZ),
         ]
         return sensors
-
-    # -- per tick --------------------------------------------------------------
 
     def tick(self, input_data):
         self.step += 1
@@ -199,7 +170,6 @@ class A2EAgent(autonomous_agent.AutonomousAgent):
             self._save_metric_info()
 
     def _save_metric_info(self):
-        # read by Bench2Drive's tools/efficiency_smoothness_benchmark.py
         with open(self.save_path / "metric_info.json", "w") as f:
             json.dump(self.metric_info, f)
 

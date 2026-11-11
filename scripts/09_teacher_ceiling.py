@@ -1,39 +1,4 @@
-"""Teacher reference lines on the stage-1 gate's own 60 windows.
-
-`coarse_minade` reports the student's minADE_6 against GT, but nothing said what
-the TEACHER scores on those same windows - so "2.937 m" had no reference line and
-could not be read as near-ceiling or far from it (eval_phase1.md §1 quoted D-031's
-1.79 m, which is 10 windows, single-sample, and therefore not comparable).
-
-Three lines, all from the label cache - no GPU, no teacher weights, no streaming:
-
-  codec floor   `gt_traj_token_ids` -> waypoints. GT pushed through the teacher's
-                own tokenizer and back. Validates the detokenization path end to
-                end; D-031 measured ~0.01 m, so a large number here means the
-                harness is wrong, not the teacher.
-  token path    `traj_token_ids` -> waypoints. What stage 1 distils, and the
-                ceiling its gate is measured against. ONE sample per window is
-                cached, so this is ADE_1. Since minADE_k <= ADE_1 for any k, it
-                is an UPPER BOUND on the teacher's minADE_6, not a match - quote
-                it as a bound.
-  action expert `traj_samples`, the continuous rollout, k=`teacher.n_traj_samples`.
-                The head the published Alpamayo numbers come from, and the one the
-                expert/flow path in stage 2 actually inherits from.
-
-Plus two HYBRIDS that split the blame between the two interleaved action dims.
-D-035 measured the teacher's accel mass at 2.8% within +/-2 bins of the GT bin
-against curvature's 42%, but that is a distribution statistic - these two convert
-it into metres. The stream is 64 waypoints x 2 dims, EVEN = curvature, ODD =
-accel (D-031 emission order, the same convention `traj_kl` / `traj_kl_accel`
-split on). Substituting one dim from `gt_traj_token_ids` isolates the other:
-
-  teacher curvature + GT accel  -> what the path shape alone is worth
-  GT curvature + teacher accel  -> what the speed profile alone is worth
-
-Window set and ordering are taken from `discover_shards` over the challenging
-split, then the same deterministic `range(gate_max_windows)` prefix the gate
-takes - so these numbers line up window-for-window with the epoch gate.
-"""
+"""Teacher reference ADEs (codec floor, token path, action expert, hybrids) on the gate windows."""
 from __future__ import annotations
 import argparse
 import json
@@ -53,12 +18,12 @@ log = logging.getLogger(__name__)
 
 
 def ade(pred: torch.Tensor, gt: torch.Tensor) -> float:
-    """Mean L2 over the horizon, x/y only - open_loop.ade for a single mode."""
+    """Mean x/y L2 over the horizon."""
     return float(torch.linalg.norm(pred[..., :2] - gt[..., :2], dim=-1).mean())
 
 
 def min_ade(pred: torch.Tensor, gt: torch.Tensor) -> float:
-    """pred (K, H, 3+) modes against one gt (H, 3+) - open_loop.min_ade, B=1."""
+    """pred (K, H, 3+) vs gt (H, 3+)."""
     d = torch.linalg.norm(pred[..., :2] - gt[None, ..., :2], dim=-1)   # (K, H)
     return float(d.mean(-1).min())
 
@@ -67,15 +32,13 @@ def main(config: str, split: str, max_windows: int | None, out: str | None) -> N
     cfg = OmegaConf.load(config)
     cache_root = Path(cfg.paths.cache_root)
 
-    # Config-only: rebuilds the future tokenizer from the checkpoint config with
-    # no weights, which is all detokenization needs (wrapper.py:141).
     tw = TeacherWrapper(cfg, load_model=False)
     tok = tw.future_traj_tokenizer
     space = tok.action_space
 
     shards = discover_shards(cache_root, _split_clips(cfg, split))
     if max_windows is not None:
-        shards = shards[:max_windows]          # the gate's own deterministic prefix
+        shards = shards[:max_windows]
     if not shards:
         raise RuntimeError(f"no cached shards for split {split!r}")
 
@@ -86,7 +49,6 @@ def main(config: str, split: str, max_windows: int | None, out: str | None) -> N
         clip_id, w_idx = path.parent.name, int(path.stem)
         cached = frames.input_path(cache_root, clip_id, w_idx)
         if not cached.exists():
-            # Streaming the clip back would make a "free" measurement cost hours.
             skipped += 1
             continue
         d = np.load(path, allow_pickle=True)
@@ -95,16 +57,12 @@ def main(config: str, split: str, max_windows: int | None, out: str | None) -> N
         hr = torch.as_tensor(wd["ego_history_rot"])[:, -1].float().cpu()   # (1, T, 3, 3)
         gt = torch.as_tensor(d["gt_future_xyz"], dtype=torch.float32)      # (H, 3)
 
-        # Both token fields are stored in the teacher's EMISSION order, so both
-        # need D-031's swap before `decode`, whose convention is `encode`'s.
         for key, name in (("gt_traj_token_ids", "floor"), ("traj_token_ids", "token")):
             toks = swap_action_dims(torch.as_tensor(d[key]).reshape(1, -1).long().cpu())
             fut, _, _ = tok.decode(hx, hr, toks)
             rows[name].append(ade(fut[0], gt))
 
-        # Hybrids: interleaved (curvature, accel) per waypoint in emission order,
-        # so ::2 is curvature and 1::2 is accel. Build each from one source and
-        # the other dim from GT, then decode through the same path as above.
+        # hybrids: even = curvature, odd = accel
         t_tok = torch.as_tensor(d["traj_token_ids"]).reshape(-1).long()
         g_tok = torch.as_tensor(d["gt_traj_token_ids"]).reshape(-1).long()
         for name, src_even in (("curv_teacher", True), ("accel_teacher", False)):
@@ -116,7 +74,6 @@ def main(config: str, split: str, max_windows: int | None, out: str | None) -> N
             fut, _, _ = tok.decode(hx, hr, swap_action_dims(mix.reshape(1, -1).cpu()))
             rows[name].append(ade(fut[0], gt))
 
-        # Expert rollout: action space -> positions, same as eval/gap.py:88.
         samples = torch.as_tensor(d["traj_samples"], dtype=torch.float32)  # (K, H, A)
         k = samples.shape[0]
         xyz, _ = space.action_to_traj(samples,

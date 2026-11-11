@@ -1,9 +1,4 @@
-"""Optimizer + schedule, shared by both stages.
-
-Split out of train_stage1 when D-024 made the two stages' parameter groups the
-same shape (adapters at 1.0x, new full-rank interface at `new_token_lr_mult`),
-so stage 2 stops silently dropping the multiplier.
-"""
+"""Optimizer and LR schedule shared by both stages."""
 from __future__ import annotations
 
 import math
@@ -13,12 +8,7 @@ import torch
 
 def build_optimizer(groups, lr: float, weight_decay: float = 0.0,
                     betas: tuple[float, float] = (0.9, 0.95)):
-    """AdamW over `[{"params": [...], "lr_mult": float}, ...]`.
-
-    Stamps `initial_lr` on every group: `cosine_lr` scales against it, and
-    without it the old code's `if "initial_lr" in g` guard was never true, so
-    the LR silently stayed flat for the whole run.
-    """
+    """AdamW over `[{"params": [...], "lr_mult": float}, ...]`."""
     pgs = []
     for g in groups:
         params = [p for p in g["params"] if p.requires_grad]

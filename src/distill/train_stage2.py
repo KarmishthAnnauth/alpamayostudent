@@ -1,25 +1,4 @@
-"""Stage 2 / phase 2: train the flow head (Edge's gen tower) on expert trajectories.
-
-Two data arms through one loop (config `stage2.dataset`):
-
-* `physicalai` - the plan-v2 cache: per window, K cached `(t, a_t, u_teacher)`
-  tuples from the teacher's action expert (D-007), loss = `flow_distill` (+ a
-  `fm_gt` anchor). No teacher in memory.
-* `bench2drive` - CARLA expert trajectories, no teacher tuples: the trainer draws
-  its own `(t, a0)` per window (`stage2.k_samples`, `stage2.t_sampler`) and the
-  loss is `flow_matching_gt`, the objective the teacher's own stage 2 uses.
-
-The AR tower is frozen: `stage2.init_ckpt` (merged stage-1 weights) plus
-`stage2.init_adapters` (the phase-1.5 RL adapters, folded in before anything is
-trained) supplies the CoC the flow head conditions on. One reasoner pass per
-window builds a `FlowContext` (per-layer K/V over prompt + history + route +
-CoC, future bins masked - flow_path.py) that the window's K flow samples share.
-
-The gen tower is FULLY fine-tuned by default (student.lora.stage2.enabled:
-false, fp32 master weights), NVIDIA's own action post-training split; LoRA r16
-is the comparison arm. Our embodiment row of action2llm/llm2action is
-full-rank in both (D-017).
-"""
+"""Stage 2: train the flow head (gen tower) on expert trajectories."""
 from __future__ import annotations
 import argparse
 import functools
@@ -43,11 +22,7 @@ log = logging.getLogger(__name__)
 
 
 class _WandB:
-    """Direct W&B wiring for stage 2 (user request 2026-09-29: know when a run
-    starts and ends). One run per job, named `<run_name>-job<id>`; `wandb.alert`
-    fires on start, on finish and on failure, which W&B forwards to email/Slack
-    per the account's alert settings. Off when `stage2.wandb` is false or wandb
-    is not importable; never allowed to kill training."""
+    """Best-effort W&B logging and start/finish alerts."""
 
     def __init__(self, cfg, enabled: bool, tag: str):
         import os
@@ -91,7 +66,7 @@ def load_student(cfg, device: str = "cuda") -> EdgeStudent:
     """Student at the phase-2 init: stage-1 merged weights + RL adapters folded in."""
     student = EdgeStudent(cfg).to(device)
     traj_spec = torch.load(Path(cfg.paths.cache_root) / "traj_tokenizer_spec.pt",
-                           weights_only=False)  # pickled callables, D-032
+                           weights_only=False)
     student.extend_trajectory_vocab(traj_spec)
     student.lm._ensure_vision_tower()
     init = Path(cfg.stage2.get("init_ckpt") or (Path(cfg.paths.runs_root) / "stage1" / "best"))
@@ -99,7 +74,7 @@ def load_student(cfg, device: str = "cuda") -> EdgeStudent:
     checkpoint.load_into(student, init)
     adapters = cfg.stage2.get("init_adapters")
     if adapters:
-        student.param_groups_stage1()                    # inject, load, fold
+        student.param_groups_stage1()
         meta = checkpoint.load_adapters(student, adapters)
         n = lora_mod.merge_lora_(student._decoder_layers())
         log.info("folded %d adapter modules from %s (step=%s) into the AR tower",
@@ -130,9 +105,7 @@ def build_dataset(cfg, student, split: str = "train"):
 
 
 def build_bucket_sampler(cfg, ds):
-    """`stage2.buckets` (bench2drive only): a WeightedRandomSampler that draws each
-    bucket of `data/b2d_buckets.py` with its configured share, same epoch length.
-    None when disabled, i.e. the uniform shuffle of runs 1-4."""
+    """WeightedRandomSampler over behaviour buckets, or None when disabled."""
     bcfg = cfg.stage2.raw.get("buckets") or {}
     if not bcfg.get("enabled", False):
         return None
@@ -155,16 +128,13 @@ def build_bucket_sampler(cfg, ds):
 
 def draw_timesteps(kind: str, n: int, k: int, device) -> torch.Tensor:
     """Teacher-convention t (data weight) per (window, sample), shape (n*k,)."""
-    if kind == "stratified":                             # TeacherWrapper.stratified_timesteps
+    if kind == "stratified":
         u = torch.rand(n, k, device=device)
         t = 0.999 * (torch.arange(k, device=device)[None, :] + u) / k
-    elif kind == "beta":                                 # the teacher's law (D-012): s ~ Beta(1.5, 1),
-        # t = 0.999 (1 - s) -> biased to t ~ 0, the HIGH-NOISE end where the sampler
-        # commits to a mode (Edge's waver + shift 5 is high-noise too). Stratified
-        # through the inverse CDF (F(s) = s^1.5) to keep the k draws spread.
+    elif kind == "beta":                                 # s ~ Beta(1.5, 1), t = 0.999 (1 - s), stratified
         u = (torch.arange(k, device=device)[None, :] + torch.rand(n, k, device=device)) / k
         t = 0.999 * (1.0 - u.pow(1.0 / 1.5))
-    elif kind == "logitnormal":                          # Edge's train-time sigma law, t = 1 - sigma
+    elif kind == "logitnormal":                          # t = 1 - sigma
         sigma = torch.sigmoid(torch.randn(n, k, device=device))
         t = (1.0 - sigma).clamp(0.0, 0.999)
     else:
@@ -201,19 +171,7 @@ def _action_space(cfg):
 
 
 def traj_space_loss(cfg, batch, a_t, t, v_pred, owner) -> torch.Tensor:
-    """Trajectory-space term (run 4, 2026-10-01): mean xy displacement, in metres,
-    of the DENOISED action estimate integrated through the cache's unicycle model.
-
-    Why: position is accel integrated twice, so a constant 0.1 sigma accel bias
-    (MSE 0.01, invisible next to an fm loss of 0.3-0.4) is 2.1 m of ADE on the
-    val windows - the whole open-loop error. The flow-matching loss is white
-    over the 64 steps; this term is the metric itself.
-
-    a_t = t a1 + (1-t) a0 and v = a1 - a0 (D-012), so a1_hat = a_t + (1-t) v.
-    Weighted by t^p (`stage2.traj_loss_t_power`): at low t the estimate is the
-    posterior MEAN of a wide distribution, whose xy optimum differs from the
-    action-space optimum flow matching needs; near t = 1 the two agree.
-    """
+    """t^p-weighted mean xy displacement (m) of the denoised estimate a1_hat = a_t + (1-t) v."""
     tt = t.view(-1, 1, 1).float()
     with torch.autocast("cuda", enabled=False):
         a1_hat = a_t.float() + (1 - tt) * v_pred.float()
@@ -226,16 +184,7 @@ def traj_space_loss(cfg, batch, a_t, t, v_pred, owner) -> torch.Tensor:
 
 
 def coc_preservation_loss(student, batch, ctx) -> torch.Tensor | None:
-    """CE on the cached CoC tokens (+ the `<|cot_end|><|traj_future_start|>`
-    boundary) from the SAME reasoner pass that builds the flow context.
-
-    Why: run 3 trained the AR-tower LoRA with the flow loss alone and the CoC
-    the tower writes broke (terminated 1.00 -> 0.73, GT-consistent 0.735 ->
-    0.656). The cached CoC is the init's own output, so this is self-
-    distillation: it holds the language behaviour while the flow loss moves the
-    perception. The lm_head runs on the gathered predictor positions only
-    (p - 1 predicts p, `losses.gather_targets`' shift rule).
-    """
+    """CE on the cached CoC tokens from the reasoner pass that builds the flow context."""
     h = ctx.final_hidden
     if h is None or not h.requires_grad:
         return None
@@ -252,7 +201,7 @@ def stage2_loss(student, batch, cfg, w, ctx) -> tuple[torch.Tensor, dict]:
     tg = flow_targets(batch, cfg, ctx.key_mask.device)
     v_pred = student.flow_forward(tg["a_t"], tg["t"], ctx, tg["owner"])
     a1 = batch["gt_traj"][tg["owner"]]
-    # a_t = t a1 + (1-t) a0 (D-012), so a0 = (a_t - t a1) / (1 - t); t <= 0.999.
+    # a0 = (a_t - t a1) / (1 - t)
     t = tg["t"].view(-1, 1, 1)
     a0 = (tg["a_t"] - t * a1) / (1 - t).clamp_min(1e-3)
     fm_gt = losses.flow_matching_gt(v_pred, a0, a1)
@@ -276,39 +225,32 @@ def stage2_loss(student, batch, cfg, w, ctx) -> tuple[torch.Tensor, dict]:
     return w["flow_distill"] * fd + w["fm_gt"] * fm_gt, {"flow_distill": float(fd), "fm_gt": float(fm_gt)}
 
 
-def main(cfg_path: str, smoke: int = 0):
+def main(cfg_path: str):
     cfg = load_config(cfg_path)
-    if smoke:
-        # `--smoke N`: N micro-batches of one epoch, a 16-window gate, and the
-        # checkpoint under runs/stage2/smoke - the bench2drive path end to end
-        # on the real card before the multi-day run is submitted.
-        cfg.stage2.raw.update(epochs=1, gate_windows=16, run_name="smoke", grad_accum=1)
-    wb = _WandB(cfg, enabled=bool(cfg.stage2.get("wandb", True)) and not smoke, tag="")
+    wb = _WandB(cfg, enabled=bool(cfg.stage2.get("wandb", True)), tag="")
     try:
-        _train(cfg, smoke, wb)
+        _train(cfg, wb)
     except BaseException as e:                                  # noqa: BLE001
         wb.finish(ok=False, text=f"{type(e).__name__}: {e}"[:500])
         raise
     wb.finish(ok=True, text="all epochs done; see runs/stage2/<run_name>/best")
 
 
-def _check_disk(cfg, smoke: int) -> None:
-    """Fail at start, not at the first save: every epoch writes a ~7.8 GB merged
-    checkpoint. Run 4's first attempt (job 529) died 2 h 43 min in with ENOSPC on
-    a root disk that had 4.5 GB free. The run dir may be a symlink to /bulk."""
+def _check_disk(cfg) -> None:
+    """Fail early if the run dir lacks space for a merged checkpoint."""
     import shutil
     run_dir = Path(cfg.paths.runs_root) / "stage2" / cfg.stage2.get("run_name", "run")
     run_dir.mkdir(parents=True, exist_ok=True)
     free = shutil.disk_usage(run_dir.resolve()).free / 2**30
-    need = 8.0 * (1 if smoke else int(cfg.stage2.epochs))
+    need = 8.0 * int(cfg.stage2.epochs)
     if free < need:
         raise RuntimeError(f"{run_dir.resolve()}: {free:.0f} GiB free, the run writes ~{need:.0f} GiB "
                            "of checkpoints - free space or symlink the run dir to /bulk")
     log.info("checkpoints -> %s (%.0f GiB free, ~%.0f needed)", run_dir.resolve(), free, need)
 
 
-def _train(cfg, smoke: int, wb: "_WandB"):
-    _check_disk(cfg, smoke)
+def _train(cfg, wb: "_WandB"):
+    _check_disk(cfg)
     student = load_student(cfg)
 
     ds, collate = build_dataset(cfg, student, "train")
@@ -339,17 +281,13 @@ def _train(cfg, smoke: int, wb: "_WandB"):
     student.train()
     for epoch in range(cfg.stage2.epochs):
         for i, batch in enumerate(dl):
-            if smoke and i >= smoke:
-                break
             batch = move_batch(batch)
             frac = step / max(total_steps, 1)
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 if physicalai and frac >= cfg.stage2.scheduled_sampling_start_frac:
-                    with torch.no_grad():                # student-sampled prefix (D-007 plan)
+                    with torch.no_grad():
                         batch["traj"] = student.generate_traj_tokens(batch)
                 w = losses.stage_weights(cfg.stage2, step, total_steps)
-                # reasoner once per window (graph kept iff AR LoRA); its final
-                # hidden states only when the CoC-preservation term reads them
                 ctx = student.build_flow_context(batch, keep_final_hidden=w.get("coc_ce", 0.0) > 0)
                 loss, parts = stage2_loss(student, batch, cfg, w, ctx)
             (loss / cfg.stage2.grad_accum).backward()
@@ -360,7 +298,7 @@ def _train(cfg, smoke: int, wb: "_WandB"):
                 step += 1
                 wb.log({"loss/total": float(loss), **{f"loss/{k}": v for k, v in parts.items()},
                         "lr": opt.param_groups[0]["lr"], "epoch": epoch}, step=step)
-                if step % 20 == 0 or smoke:
+                if step % 20 == 0:
                     log.info("epoch %d step %d/%d loss %.4f %s  peak %.1f GiB", epoch, step,
                              total_steps, loss.item(), parts,
                              torch.cuda.max_memory_allocated() / 2**30)
@@ -394,7 +332,6 @@ def _train(cfg, smoke: int, wb: "_WandB"):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="configs/default.yaml")
-    ap.add_argument("--smoke", type=int, default=0, help="N micro-batches, then gate + save, and stop")
     a = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    main(a.config, smoke=a.smoke)
+    main(a.config)

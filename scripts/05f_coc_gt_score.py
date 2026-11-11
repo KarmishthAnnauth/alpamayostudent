@@ -1,21 +1,4 @@
-"""Score a free-running CoC dump against the DRIVER, not the teacher (D-038 metrics).
-
-`05b_eval_coc.py --dump` writes one (student, teacher) trace pair per window. This
-reads that file and grades both traces with `eval.gt_reward.gt_metrics` against
-the cached `gt_future_xyz`, so the student and the teacher are judged on the same
-windows by the same rule:
-
-    consistent      stated maneuver vs the driver's speed profile / path, over the
-                    windows where the claim is CHECKABLE (STOP, SLOW, YIELD, ...,
-                    and FOLLOW/KEEP only when the driver braked from speed)
-    gt_false_clear  driver braked hard from speed, trace said clear / keep / accelerate
-    direction_ok    driver turned; trace names that direction
-    hazard_ungrounded  trace names a hazard; driver did not react
-    braked -> says slow/stop   the user's criterion (2026-09-18): when the driver
-                    slowed or stopped, did the CoC say so?
-
-Rows without a `window` field (dumps written before this script) are mapped by
-dataset order, which `05b` walks in `discover_shards` order for the split.
+"""Score a free-running CoC dump against the driver's future.
 
     python scripts/05f_coc_gt_score.py --dump runs/coc-<run>-val.jsonl --split val
 """
@@ -57,10 +40,6 @@ def main() -> int:
     agg = {"student": [], "teacher": []}
     braked = {"student": Counter(), "teacher": Counter()}
     n_braked = 0
-    # Severity split of the braking windows: a full stop, a hard brake (>2.5 m/s
-    # lost over the horizon, no stop), or a mild slowdown (1.5-2.5 m/s). "Keep
-    # distance" behind a lead car that eases off is a fair description of the
-    # mild case; it is not of a stop.
     sev_n = Counter()
     sev_slow = {"student": Counter(), "teacher": Counter()}
     for i, r in enumerate(rows):

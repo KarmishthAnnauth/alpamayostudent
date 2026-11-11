@@ -1,23 +1,6 @@
 #!/bin/bash
-# Phase 2: closed-loop Bench2Drive eval of a stage-2 checkpoint (PHASE2_DECISIONS T3).
-#
-#   bash scripts/06_b2d_closed_loop.sh --run-id r4-smoke --routes-subset 0          # one route
-#   bash scripts/06_b2d_closed_loop.sh --run-id r4-b2d220                           # all 220, resumable
-#   bash scripts/06_b2d_closed_loop.sh --run-id r4-k6mean --k 6 --temperature 1 --select mean
-#
-# Two processes (src/distill/closed_loop/a2e_common.py says why):
-#   1. the model server, in OUR env on the Ada behind the usual guard
-#      (scripts/ada_run.sh; SERVER_LAUNCHER=... to change), holding the student;
-#   2. the stock Bench2Drive evaluator from ~/projects/TriTrack, in ITS env
-#      (python 3.10 + carla 0.9.15), which starts its own CARLA server and
-#      imports src/distill/closed_loop/a2e_agent.py.
-# Re-running with the same --run-id resumes from results.json.
-#
-# Output: runs/closed_loop/<run-id>/{results.json, live.txt, eval.log, server.log,
-#         viz/<route>/{meta/*.json, metric_info.json}}
-#
-# Ports: CARLA binds --port, +1, +2 (default 2500) and the traffic manager
-# --tm-port (default 8000). Check `ss -lntp` first on this shared box.
+# Closed-loop Bench2Drive eval of a stage-2 checkpoint (model server + B2D evaluator).
+# Usage: bash scripts/06_b2d_closed_loop.sh --run-id <id> [--routes-subset N] [--k K --temperature T --select S]
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 REPO=$PWD
@@ -57,7 +40,7 @@ for p in $PORT $((PORT + 1)) $((PORT + 2)) $TM_PORT; do
     fi
 done
 
-# ---- 1. model server ---------------------------------------------------------
+# Model server
 SERVER_LAUNCHER=${SERVER_LAUNCHER:-scripts/ada_run.sh}
 CKPT_ARG=(--ckpt "$CKPT"); [[ "$CKPT" == init ]] && CKPT_ARG=()
 rm -f "$SOCK"
@@ -77,7 +60,7 @@ done
 [[ -S "$SOCK" ]] || { echo "[a2e] model server not ready after 600 s" >&2; exit 1; }
 echo "[a2e] model server ready"
 
-# ---- 2. evaluator (environment as TriTrack's run_eval.sh sets it) -------------
+# Evaluator
 source "$TRITRACK_ROOT/tools/load_env.sh"
 _tritrack_load_env "${TRITRACK_ENV_FILE:-$TRITRACK_ROOT/tritrack.env}"
 [[ -x "${TRITRACK_CARLA_ROOT:-}/CarlaUE4.sh" ]] || { echo "no CARLA at TRITRACK_CARLA_ROOT=${TRITRACK_CARLA_ROOT:-<unset>}" >&2; exit 1; }

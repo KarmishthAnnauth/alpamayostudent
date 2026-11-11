@@ -1,17 +1,4 @@
-"""Phase 2, step 3: open-loop minADE of the FLOW HEAD on Bench2Drive.
-
-Replaces the never-run `05_eval.py`. Samples k trajectories per window with the
-10-step ODE (flow_path.sample_actions), converts them through the teacher's
-unicycle action space and scores minADE_k against the expert's future, next to
-the constant-velocity baseline (the zero action = mean accel/curvature, which
-is what an untrained head effectively emits) so epoch 0 has a number to beat.
-
-    bash scripts/ada_run.sh scripts/05k_flow_minade.py --split val --n 200        # the init
-    bash scripts/ada_run.sh scripts/05k_flow_minade.py --ckpt runs/stage2/epoch0    # a checkpoint
-
-`--ckpt` loads a merged stage-2 checkpoint (AR tower already carries the RL
-adapters); without it the phase-2 init is used, i.e. the untrained head.
-"""
+"""Phase 2, step 3: open-loop minADE of the FLOW HEAD on Bench2Drive."""
 from __future__ import annotations
 import argparse
 import json

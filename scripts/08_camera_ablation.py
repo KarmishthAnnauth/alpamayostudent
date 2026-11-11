@@ -1,26 +1,7 @@
-"""Camera ablation for the trained stage-1 student: run the gate (and optionally
-the CoC) with an arbitrary camera subset, against a merged checkpoint.
+"""Camera-subset ablation of the stage-1 student (gate and optional CoC).
 
-Everything is read from the label cache, which stores frames keyed per camera
-(`img|<camera>|<frame>`) at 100% coverage, so a subset costs nothing extra -
-the unused JPEGs are simply not decoded. Only `data.cameras` differs between
-arms; every other config value is shared, which is what makes this an ablation
-rather than two runs.
-
-    # baseline: the 4-camera set the checkpoint was trained with
-    python scripts/08_camera_ablation.py --tag 4cam --repeats 3
-
-    # the question: front wide only (NVIDIA's own 1-camera config)
-    python scripts/08_camera_ablation.py --tag 1cam-frontwide \
-        --cameras camera_front_wide_120fov --repeats 3 --coc 8
-
-    # compare whatever has been written so far
+    python scripts/08_camera_ablation.py --tag 1cam-frontwide --cameras camera_front_wide_120fov --repeats 3
     python scripts/08_camera_ablation.py --report
-
-NB the gate samples `k` trajectories at temperature (`eval/coarse_minade.py`)
-and does NOT seed itself, so single runs are noisy - epoch-to-epoch swings of
-0.15-0.3 m are normal. `--repeats` re-runs with seed+i and reports the spread,
-so the 4-cam -> 1-cam delta arrives with an error bar instead of without one.
 """
 from __future__ import annotations
 import argparse
@@ -45,8 +26,7 @@ log = logging.getLogger("camera_ablation")
 
 
 class _P90(logging.Handler):
-    """`coarse_minade` returns only minADE but logs p90/n. Catch them so the
-    JSON record is complete rather than half the result."""
+    """Captures p90/n logged by coarse_minade."""
 
     def __init__(self):
         super().__init__()
@@ -59,9 +39,7 @@ class _P90(logging.Handler):
 
 
 def _decode(student, ids: list[int]) -> tuple[str, bool]:
-    """Student ids -> (coc_text, terminated). Mirrors 05a_inspect_coc.py: drop
-    appended trajectory ids the tokenizer does not know, then cut at the CoC
-    terminator so over-generation past it is not counted as content."""
+    """Student ids -> (coc_text, terminated), cut at the CoC terminator."""
     lo = student.new_token_range[0]
     text = student.tokenizer.decode([i for i in ids if i < lo], skip_special_tokens=True)
     for s in ("<|cot_end|>", "</think>"):
@@ -73,10 +51,9 @@ def _decode(student, ids: list[int]) -> tuple[str, bool]:
 def build_student(cfg, ckpt_path: Path):
     student = EdgeStudent(cfg).cuda()
     traj_spec = torch.load(Path(cfg.paths.cache_root) / "traj_tokenizer_spec.pt",
-                           weights_only=False)  # pickled callables, D-032
+                           weights_only=False)  # pickled callables
     student.extend_trajectory_vocab(traj_spec)
-    # The merged checkpoint carries the SigLIP2 tower; `_ensure_vision_tower` is
-    # lazy, so attach it BEFORE load_state_dict or it sees unexpected visual.* keys.
+    # Attach vision tower before loading merged weights.
     student.lm._ensure_vision_tower()
     meta = checkpoint.load_into(student, ckpt_path)
     student.eval()
@@ -163,10 +140,6 @@ def main() -> int:
     if a.report:
         return report(out_dir)
 
-    # The ONLY thing that differs between arms. Mutated before the student is
-    # built so nothing can capture the old list: `context_builder()` reads
-    # cfg.data.raw["cameras"] at call time (edge_wrapper.py), and coarse_minade
-    # calls it internally.
     if a.cameras:
         cams = [c.strip() for c in a.cameras.split(",") if c.strip()]
         from distill.student.prompt import CAMERA_INDEX
@@ -190,8 +163,7 @@ def main() -> int:
     logging.getLogger("distill.eval.coarse_minade").addHandler(h)
     minades = []
     for i in range(a.repeats):
-        # The gate does not seed itself; seed here so repeats are reproducible
-        # and the spread measures the sampler, not an unknown RNG state.
+        # Seed each repeat for reproducibility.
         torch.manual_seed(a.seed + i)
         m = coarse_minade(cfg, student, split=a.split, k=cfg.eval.minade_k,
                           max_windows=a.gate)

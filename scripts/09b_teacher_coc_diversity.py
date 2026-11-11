@@ -1,27 +1,4 @@
-"""Is the teacher's CoC multimodal per scene? Sample it K times per window.
-
-Stage 1's text loss is hard-label CE on ONE teacher sample per window
-(`losses.text_kl_or_ce`; Phase A caches no logits). Whether that is a good
-target depends on a fact nobody has measured: for a given scene, does the
-teacher at T=0.6 / top_p 0.98 say the same maneuver every time, or is it split
-(say 60% FOLLOW / 40% NUDGE)?
-
-  - Near-deterministic -> one sample IS the distribution; hard labels are fine,
-    and the student's hedging on committed maneuvers (05c: p~0.15-0.25 on the
-    teacher's verb where the teacher committed) is the student's failure -
-    capacity or perception.
-  - Split -> the cached labels are a coin flip per window; the student's hedge
-    is the *correct* expectation of a noisy target, and the fix is a soft
-    target (the teacher's first-token distribution), i.e. a relabel.
-
-Runs the released teacher path K times per window on N val windows (clips are
-re-streamed: the cache holds only the student's 360x640 frames). Reports
-per-window majority share and entropy over maneuver classes, and - the number
-that matters - on windows whose CACHED label is a committed maneuver, how often
-the K fresh samples agree with it.
-
-    sbatch scripts/sbatch_teacher_diversity.sh          # Blackwell
-"""
+"""Sample the teacher's CoC K times per window to measure per-scene maneuver diversity."""
 from __future__ import annotations
 import argparse
 import json

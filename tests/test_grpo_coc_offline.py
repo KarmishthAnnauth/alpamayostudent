@@ -1,4 +1,4 @@
-"""GRPO-on-CoC (D-037): the pure parts. No GPU, no model."""
+"""GRPO-on-CoC reward and advantage functions (CPU)."""
 import math
 import pytest
 import sys
@@ -46,7 +46,7 @@ def test_group_advantages_normalised_and_skips_flat_groups():
     assert a[0] > 0 and all(x < 0 for x in a[1:])
 
 
-# ---- run 4: per-span rewards (D-040) ----
+# per-span rewards
 import numpy as np                                                       # noqa: E402
 from distill.eval.gt_reward import kinematics, perspan_reward             # noqa: E402
 
@@ -96,7 +96,7 @@ def test_perspan_self_consistency_reaches_both_spans():
     assert c1 - c2 == pytest.approx(0.5 * 2.0)
 
 
-# ---- run 5: the grounded CoC reward (D-042) ----
+# grounded CoC reward
 W5 = SimpleNamespace(ade=1.0, ade_cap=8.0, kin=1.0, dir=0.5, hazard=0.0, teacher=0.0,
                      self_consistency=0.5, fail=-2.0, max_tokens=48)
 

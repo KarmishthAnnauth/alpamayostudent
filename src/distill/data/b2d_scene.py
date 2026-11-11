@@ -1,23 +1,4 @@
-"""Replay scenes for the DiffGRPO reward: what the log says was around the ego.
-
-One scene per window = the logged 2-D boxes of every obstacle actor over the
-window's 65 frames (t0 .. t0+64) in the STUDENT ego frame at t0 (rear axle,
-+y left, D-038 / P2-11), plus the ego's own logged boxes, the traffic light
-affecting the ego per frame, and the route target. `rl/replay_reward.py` rolls
-a sampled trajectory out against this - NAVSIM's non-reactive setting, which is
-what ReCogDrive's DiffGRPO stage scores against (its metric cache is exactly
-this: logged agents, no simulator in the loop).
-
-Obstacles: `vehicle`, `walker`, and `traffic_sign` entries whose `type_id`
-starts with `static.prop.` (cones, warning triangles, accident debris - the
-things on the road). Pole-mounted signs and traffic lights are not obstacles.
-
-Layout: `<cache>/<clip>/{w:02d}_scene.npz` next to the window's targets, built
-by `scripts/01d_b2d_scenes.py` from the raw annotations. Every scene is
-self-checked at build time: the ego's own box at t0, transformed into the t0
-frame, must sit at (+1.25, 0) axis-aligned - which pins the yaw convention of
-CARLA's `rotation` and the box construction on every window.
-"""
+"""Logged Bench2Drive scenes (obstacle boxes, lights, route target) in the ego frame for the replay reward."""
 from __future__ import annotations
 import dataclasses
 from pathlib import Path
@@ -68,7 +49,7 @@ class FrameBoxes:
     ego_center: np.ndarray     # (3,)
     ego_yaw_deg: float
     ego_extent: np.ndarray     # (2,)
-    ego_bbx_dx: float          # box centre offset along the body x axis from the actor origin
+    ego_bbx_dx: float          # box centre offset from actor origin
     tl_state: int
     tl_trigger: np.ndarray     # (3,) world, NaN when no light affects the ego
     target_xy: np.ndarray      # (2,) world
@@ -120,8 +101,6 @@ def load_clip_boxes(clip_dir: Path, n_frames: int) -> list[FrameBoxes]:
     return [parse_frame(_read_anno(clip_dir / "anno" / f"{k:05d}.json.gz")) for k in range(n_frames)]
 
 
-# ---- geometry --------------------------------------------------------------
-
 _LOCAL = np.array([[1, 1], [1, -1], [-1, -1], [-1, 1]], dtype=np.float64)   # corner signs
 
 
@@ -151,8 +130,6 @@ def corners_yaw(corners: np.ndarray) -> np.ndarray:
     e = corners[..., 0, :] - corners[..., 3, :]
     return np.arctan2(e[..., 1], e[..., 0])
 
-
-# ---- scene -----------------------------------------------------------------
 
 def build_scene(anno: ClipAnno, boxes: list[FrameBoxes], t0: int, clip_id: str | None = None) -> dict[str, Any]:
     if not (0 <= t0 and t0 + N_FUTURE < len(boxes)):
@@ -188,7 +165,7 @@ def build_scene(anno: ClipAnno, boxes: list[FrameBoxes], t0: int, clip_id: str |
         tl_state[j] = fb.tl_state
         if fb.tl_state != TL_NONE and np.isfinite(fb.tl_trigger).all():
             tl_stop[j] = world_to_ego_xy(w2e, fb.tl_trigger[:2], fb.tl_trigger[2])
-    # self-check: the ego's own box at t0 in the t0 frame is axis-aligned at (+offset, 0)
+    # self-check: ego box at t0 must be axis-aligned at (+offset, 0)
     fb0 = boxes[t0]
     c0 = ego_c[0].astype(np.float64)
     yaw0 = float(np.degrees(corners_yaw(c0)))
@@ -230,7 +207,7 @@ def load_scene(path: Path) -> dict[str, Any]:
 
 
 def empty_scene(ego_extent=(2.446, 0.918), offset: float = REAR_AXLE_OFFSET_M) -> dict[str, Any]:
-    """A scene with no actors and no lights (tests, and the no-map ablation)."""
+    """A scene with no actors and no lights."""
     return {
         "frames": np.arange(N_SCENE, dtype=np.int32),
         "actor_id": np.zeros(0, dtype=np.int64),

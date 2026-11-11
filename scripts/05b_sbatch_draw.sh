@@ -1,9 +1,6 @@
 #!/bin/bash
-# One free-running CoC draw on the Blackwell via SLURM: full split, route hint,
-# the runbook's 500-window protocol widened to every window in the split.
-#
-#     TAG=<name> [AD=<adapters dir>] [N=1046] [SPLIT=val] sbatch scripts/05b_sbatch_draw.sh
-#
+# One free-running CoC draw over a full split.
+# Usage: TAG=<name> [AD=<adapters dir>] [N=1046] [SPLIT=val] sbatch scripts/05b_sbatch_draw.sh
 #SBATCH --job-name=a2e-eval-coc
 #SBATCH --partition=main
 #SBATCH --gres=gpu:rtxpro6000:1

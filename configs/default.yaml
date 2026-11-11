@@ -1,91 +1,29 @@
 # Alpamayo 1.5 -> Cosmos 3 Edge distillation
-# Single-GPU profile, 5k curated clips. Teacher swapped from Alpamayo 2 Super
-# (34B, ~68GB bf16) to Alpamayo 1.5 (11.08B, 22.16GB bf16) to fit the available
-# RTX GPU. See DECISIONS.md D-018..D-023.
 
 paths:
-  # Storage split per slurm_tutorial/08-storage.md, which is prescriptive:
-  #   ~/            code only
-  #   /bulk/users/  own data - the 7.3TB disk, no power-loss protection, 500GB quota
-  #   /data/<user>/ results and checkpoints - the power-loss-protected OS disk
-  # Model weights are re-downloadable, so they live on /bulk. The label cache is
-  # NOT: regenerating it is ~21h of GPU + network, so it sits on /data despite
-  # being "generated" data. Clips are still streamed, never materialised (D-019).
-  dataset_root: /bulk/users/vla/alpamayo2edge/data/physicalai-av
-  cache_root: /bulk/users/vla/alpamayo2edge/distill_cache
-  runs_root: /data/vla/alpamayo2edge/runs
-  # Phase 2 (2026-09-28): Bench2Drive windows built by scripts/01c_b2d_windows.py
-  # from /bulk/datasets/bench2drive/extracted (same shard layout as distill_cache,
-  # no teacher targets - src/distill/data/bench2drive.py).
-  b2d_cache_root: /bulk/users/vla/alpamayo2edge/b2d_cache_b2dnorm
-                                             # run 2+: actions normalised with Bench2Drive's own
-                                             # stats (configs/b2d_action_stats.json -> <cache>/
-                                             # action_space.json, T1). Run 1's teacher-normalised
-                                             # cache is /bulk/users/vla/alpamayo2edge/b2d_cache.
-  # Local snapshot of nvidia/Alpamayo-1.5-10B (21 GB, 5 shards). from_pretrained takes
-  # a path, so this skips the re-download. Its config.json still points
-  # vlm_name_or_path at nvidia/Cosmos-Reason2-8B, whose processor/tokenizer are
-  # fetched into HF_HUB_CACHE - weights are not, they are in the shards below.
-  teacher_repo: /bulk/users/vla/alpamayo2edge/teacher-model
-  # Local snapshot of nvidia/Cosmos3-Edge, pinned at revision a9d944e2 (8.6 GB,
-  # downloaded 2026-08-28). Deliberately a local dir, not an HF repo id: an
-  # untrained checkpoint the retention baseline is measured against must not move
-  # under us, and it keeps the load path off the network entirely.
-  student_repo: /bulk/users/vla/alpamayo2edge/cosmos3-edge
+  dataset_root: data/physicalai-av
+  cache_root: data/distill_cache
+  runs_root: outputs/runs
+  b2d_cache_root: data/b2d_cache_b2dnorm
+  teacher_repo: models/alpamayo-1.5-10b
+  student_repo: models/cosmos3-edge
 
 data:
   num_clips: 5000
-  increments: [500, 2000, 5000]              # incremental labeling / scaling-curve points
-  windows_per_clip: 2                        # training windows sampled per 20s clip
-  # 4-camera reference set = the Alpamayo 1.5 load_physical_aiavdataset default and the
-  # configuration NVIDIA's own ablation notebook tops out at (D-023). All 7 ring cameras
-  # remain addressable (camera index map covers 0..6) if we ever want the ablation.
-  # RUN 5: single camera. NVIDIA's own camera-number ablation
-  # (alpamayo1.5/notebooks/inference_cam_num.ipynb) defines exactly this as its
-  # "1 cam" configuration, and its configs nest 1 (front wide) subset 2 (+ front
-  # tele) subset 4 - so front wide is the vendor's base, and `+ front_tele_30fov`
-  # is the principled next rung if one view proves too little. `front_wide_120fov`
-  # is also the only entry whose CAMERA_DISPLAY_NAME is the plain "Front camera"
-  # (student/prompt.py), which is the label the model was trained to read.
-  #
-  # The 4-camera labels are REUSED as-is - no relabelling (measured, 2395 cached
-  # CoC traces): 80.1% are anchored to ahead/our-lane, 14.7% use left/right as an
-  # EGO MANEUVER direction ("turn right"), and only 0.7% reference a side object
-  # with no ahead-anchor. For comparison 0.9% say "behind", which the 4-camera set
-  # could not see either (it has no rear camera) and run 253 trained through
-  # without trouble. Trajectory targets from a wider-view teacher are privileged
-  # distillation, which is standard and if anything raises target quality.
-  # RUN 7: back to the 4 cameras the labels were made with. D-036: the CoC
-  # collapse (FOLLOW/KEEP over-emitted, direction silent) is a perception limit -
-  # the only arm that ever emitted LANE_CHANGE near the teacher's rate was run-253
-  # at 4 cameras, and the 11B teacher handed one camera shows the same collapse
-  # (D-037). Run 5's single-camera rationale is kept below for the record.
+  increments: [500, 2000, 5000]
+  windows_per_clip: 2
   cameras: [camera_cross_left_120fov, camera_front_wide_120fov, camera_cross_right_120fov,
             camera_front_tele_30fov]
-  # cameras: [camera_front_wide_120fov]      # runs 5-6 (single camera)
-  context_frames: 4                          # frames per camera (teacher convention)
-  student_resolution: [360, 640]             # Edge control resolution (H, W)
-  # Write the student's own inputs (JPEG frames + ego history) during the
-  # labeling pass, which already loads every window. Without this, stage-1
-  # training re-streams every clip once per epoch.
-  # Size: 10k windows x 16 frames (4 cameras x 4) at 360x640 q92. Measured
-  # bounds on synthetic 360x640: 14 KB/frame smooth, 220 KB/frame pure noise;
-  # real road footage sits nearer the low end, so expect single-digit to low
-  # tens of GB, NOT the ~105GB the same frames would take uncompressed.
+  context_frames: 4                          # frames per camera
+  student_resolution: [360, 640]             # (H, W)
   cache_student_frames: true
-  frame_jpeg_quality: 92                     # raise toward 100 if artifacts show
-                                             # in the vision tower's features
+  frame_jpeg_quality: 92
   split:
-    holdout_countries: [JPN, ZAF]            # geographic test holdout - never trained on
+    holdout_countries: [JPN, ZAF]
     val_fraction: 0.05
     debug_clips: 100
   curation:
-    # Stratified oversampling of long-tail scenarios. Weights multiply base
-    # sampling probability for clips whose metadata/first-pass teacher labels match.
     strata_weights:
-      # NB: the teacher-meta-action bootstrap path is gone - Alpamayo 1.5 has no
-      # meta-action head (D-021). Strata are metadata-only; cut_in is unreachable
-      # until a replacement signal exists.
       intersection: 3.0
       pedestrian: 3.0
       cut_in: 4.0
@@ -95,537 +33,173 @@ data:
       default: 1.0
 
 teacher:
-  dtype: bf16                                # validate fp8 against bf16 on debug split first
-  max_coc_tokens: 48                         # short-CoC budget == student deployment context
+  dtype: bf16
+  max_coc_tokens: 48
   topk_logits: 32
-  flow_targets_per_window: 12                # K stratified (t, x_t, u_teacher) tuples (D-007/012)
-  timestep_stratification: uniform           # uniform bins over [0, 0.999); t = data weight
-                                             # (D-012; cap is now our choice, D-020)
-  n_traj_samples: 4                          # sampled continuous trajectories (sanity/eval)
-  expert_batch: 4                            # KV batch for expert forwards (memory-bound)
-  # Window-level fetch concurrency. Streaming is network-bound and the teacher is
-  # GPU-bound, so they overlap: the first live run measured 30 s/window at 20% GPU
-  # utilisation, i.e. ~24 s of streaming per ~6 s of teacher. NVIDIA's
-  # load_physical_aiavdataset fetches its cameras serially inside one call, so the
-  # concurrency has to be per window, not per camera. Past ~4 the teacher is the
-  # floor and more workers only add memory. Set to 1 for a serial run when debugging.
+  flow_targets_per_window: 12
+  timestep_stratification: uniform
+  n_traj_samples: 4
+  expert_batch: 4
   prefetch_workers: 4
-  prefetch_depth: 6                          # windows in flight; the memory knob,
-                                             # each holds decoded frames
-  gen_top_p: 0.98                            # teacher release inference defaults
+  prefetch_depth: 6
+  gen_top_p: 0.98
   gen_temperature: 0.6
-  feat_layers: [3, 8, 12, 17, 21, 26, 30, 35]   # cached teacher layers (feature KD / CKA, D-008)
-                                             # re-spaced over A1.5's 36 layers (was 64, D-019)
-  feat_pool_len: 8                           # mean-pool segments per cached layer
+  feat_layers: [3, 8, 12, 17, 21, 26, 30, 35]
+  feat_pool_len: 8
 
 student:
-  # D-024: capability transfer, not compression - both stages adapt through LoRA.
-  # See TRAINING_STRATEGY.md §2. Injection is scoped to the decoder-layer stack;
-  # targets are matched by cosmos-framework's inject_lora_pre_fsdp (plain leaf
-  # names, and the `_moe_gen` suffix is what makes a target gen-tower-only).
   lora:
     stage1:                                  # AR/reasoner tower
-      enabled: true                          # false = full-FT ablation; does NOT
-                                             # fit 48GB (43.5GB of states before
-                                             # activations) - 500-clip diagnostic only
-      rank: 48                               # RUN 6: back from 96 (runs 4-5), TOGETHER with the
-                                             # targets below - 232's exact setting, so the
-                                             # comparison is one change. r96+MLP was adopted on
-                                             # the confounded comparison recorded below, and the
-                                             # metric that can now see the CoC says it hurt:
-                                             # best val CoC NLL 0.455 at r48 attention-only (job
-                                             # 232) vs 0.509 / 0.536 at r96+MLP (jobs 253 / 313),
-                                             # 19.3M -> 99.1M adapter params, the NLL peak moving
-                                             # from epoch 2 to epoch 1, and a 0.115-0.147
-                                             # train->val maneuver-accuracy gap on free-running
-                                             # CoC (05b_eval_coc.py, D-036). Capacity/data
-                                             # mismatch is the simplest reading; this run tests it.
-                                             # ---- history of the r96 decision, for the record:
-                                             # Job 243 (r96 + MLP targets) reached 2.414 m; job
-                                             # 232 (r48, attention-only) reached 2.463 m. Those
-                                             # runs differ in THREE ways, not one: rank, targets
-                                             # (19.3M -> 99.1M adapter params), and dataset size
-                                             # - 243 ran 240 steps on ~500 clips (30 steps/epoch)
-                                             # while 232 ran ~4140 on the full 9477-clip split
-                                             # (593 steps/epoch). 243 got the better gate from
-                                             # 1/20th the data and 1/20th the steps, which is
-                                             # suggestive but attributable to none of the three.
-                                             # Kept because it is the better number we have and
-                                             # the base stays frozen either way (no full-FT
-                                             # forgetting risk). Run 4 was the first full-data run
-                                             # at those settings; run 6 is the ablation it owed.
-      alpha: 96                              # 2x rank, the framework's own ratio - scaled with rank
+      enabled: true
+      rank: 48
+      alpha: 96
       targets: [q_proj, k_proj, v_proj, o_proj]
-      # RUN 6: attention-only again. mlp.up_proj / mlp.down_proj (path-qualified -
-      # the leaf names are shared with the gen tower) were runs 4-5's addition and
-      # revert with the rank; see the rank comment.
-    stage2:                                  # generation/diffusion tower
-      enabled: false                         # PHASE 2 (2026-09-28): FULL FT of the gen tower,
-                                             # NVIDIA's own action post-training split (reasoner
-                                             # frozen, gen tower fully trained, fresh head rows at a
-                                             # higher lr). Fits the 96 GB card at ~50 GB with fp32
-                                             # master weights (stage2.fp32_master). true = the LoRA
-                                             # r16 comparison arm, NVIDIA's shipped Edge default.
-      rank: 16                               # Cosmos3-Edge.yaml's shipped default
+    stage2:                                  # gen tower
+      enabled: false                         # false = full FT
+      rank: 16
       alpha: 32
       targets: [q_proj_moe_gen, k_proj_moe_gen, v_proj_moe_gen, o_proj_moe_gen]
-    stage2_ar:                               # RUN 3 (2026-10-01): LoRA on the AR tower DURING
-      enabled: true                          # stage 2, trained by the flow loss through the
-      rank: 48                               # reasoner K/V (build_flow_context keeps the graph).
-      alpha: 96                              # Why: the CoC probe on run 2 (oracle vs anti-oracle
-      targets: [q_proj, k_proj, v_proj, o_proj]   # CoC: 1.97 vs 2.03 m) showed the decoder
-      lr_mult: 2.0                           # ignores the text, so decisions must come through
-                                             # perception. Stage-1 geometry (r48, attention-only);
-                                             # lr = 2 x stage2.lr = 1e-4, stage 1's rate.
-                                             # false = run 2's recipe (AR tower frozen).
-    train_shared_action_embeds: false        # action_modality_embed + time_embedder are
-                                             # shared by all 32 embodiments: a forgetting
-                                             # channel no row mask covers. Keep off.
-  new_token_lr_mult: 8.0                     # trajectory rows, action-domain rows, projections
-  action_domain_id: 31                       # new embodiment domain slot for the teacher's
-                                             # accel/curvature space (D-017); verify unused
+    stage2_ar:                               # AR-tower LoRA during stage 2
+      enabled: true
+      rank: 48
+      alpha: 96
+      targets: [q_proj, k_proj, v_proj, o_proj]
+      lr_mult: 2.0
+    train_shared_action_embeds: false
+  new_token_lr_mult: 8.0
+  action_domain_id: 31
   layer_map:
-    mode: cka                                # cka primary; uniform demoted to baseline (D-008)
-    cka_probe_batches: 4                     # stage-1 batches used to probe the mapping,
-                                             # measured on the UNTRAINED student before
-                                             # step 0 (was cka_probe_clips, which nothing
-                                             # read - the trainer hardcoded uniform)
+    mode: cka
+    cka_probe_batches: 4
 
 stage1:
-  # RUN 7 (D-043, 2026-09-17): CoC from the teacher, trajectory from the DRIVER,
-  # and the two coupled. Runs 5-6 trained the trajectory tokens on the teacher's
-  # own token distribution (3.77 m ADE_1 on the gate windows, accel half near
-  # uninformative - D-035/D-036) with `gt_ce: 0.0`, and the student sat on that
-  # ceiling at 3.2-3.7 m. Run 4, the one run with a GT anchor, reached 2.23 m.
-  # And D-040 measured that the trajectory never read the CoC at all: one
-  # (CoC, trajectory) pair per window, both fixed by the same images, so the
-  # trajectory head learned f(images). Four changes, each named below:
-  #   traj_prefix: gt        GT bins are the teacher-forced prefix AND the target
-  #   loss_weights           teacher trajectory KL off, gt_ce on (flat, no ramp)
-  #   route_hint: true       the driver's direction in the <|route_start|> slot
-  #   image_dropout: 0.3     trajectory read from CoC + history on 30% of samples
-  #   filter_contradictions  windows whose CoC flatly contradicts GT are dropped
-  epochs: 12                                 # RUN 8: a CEILING; early_stop_patience ends the run.
-                                             # At lr 3e-4 the CoC peaked at epoch 1-2 in every run
-                                             # (D-036, D-047: 7c's best driver-grounded epoch was 1),
-                                             # i.e. the run was over before the selector had more than
-                                             # two candidates. lr is now 1e-4 (below), so the same
-                                             # integrated step lands around epoch 3-5 and the cap has
-                                             # to move with it. ~2.2 h/epoch + ~10 min coc_gt eval =
-                                             # ~28 h for all 12, inside the 2-20:00:00 wall.
-  micro_batch: 4                             # LoRA r48, 4 cameras: peak ~58 GiB (job 232).
-  grad_accum: 8                              # effective batch 32.
-  lr: 1.0e-4                                 # RUN 8: was 3.0e-4 (unchanged since run 2). At 3e-4 the
-                                             # driver-grounded CoC peaked at epoch 1 and then drifted
-                                             # to the teacher's phrasing (D-047), so selection only ever
-                                             # saw a coarse grid of the trajectory and the peak itself
-                                             # was stepped over. A third of the step with 2x the epochs
-                                             # keeps roughly the same total distance travelled but puts
-                                             # ~4x more checkpoints near the optimum.
+  epochs: 12
+  micro_batch: 4
+  grad_accum: 8
+  lr: 1.0e-4
   warmup_frac: 0.03
   weight_decay: 0.05
-  # false because the model cannot do it, not because we don't want it:
-  # Nemotron3DenseVLTextForCausalLM has no checkpoint path in reasoner_forward;
-  # the framework's mechanism (config.activation_checkpointing.mode) is forced to
-  # "none" by Cosmos3OmniModel.__init__. The uncheckpointed peak fits the 96 GB card.
   grad_checkpoint: false
-  # Which trajectory stream is teacher-forced into the sequence at the 128 future
-  # positions. "gt": the cached `gt_traj_token_ids` (the driver's future through
-  # the teacher's tokenizer, dim-swapped, D-031), so `gt_ce` trains
-  # p(GT bin t | GT bins < t). Run 4 trained a GT target on a TEACHER prefix - a
-  # conditional the model is never asked for at decode time. "teacher" = runs 1-6.
   traj_prefix: gt
-  # Fill `<|route_start|>...<|route_end|>` with the direction the driver took
-  # (turn left / turn right / straight, `eval.gt_reward.route_hint`; val rates
-  # 6.2% / 5.8% / 88%). The teacher was labelled with NO route and its turn
-  # direction is opposite to the driver's 17% of the time (D-038). Direction
-  # only - it must not leak the speed profile, which is what the CoC is for. At
-  # deployment the hint comes from navigation (Bench2Drive supplies commands).
-  # Applies to EVERY context this config builds (train, gate, val NLL, 05b/05d).
   route_hint: true
-  # Probability that a TRAIN window is served with its frames zeroed. On those
-  # samples the CoC/struct losses are masked (a CoC is not to be learned from a
-  # blank frame) and only the trajectory loss applies, so the trajectory must be
-  # read from ego history + route + the teacher-forced CoC text. That is the
-  # mechanism that makes the CoC load-bearing (D-040: forcing "turn left" vs
-  # "turn right" moved the heading by ~2 degrees). 0.3 keeps 70% of the CoC
-  # gradient; the cost is nil (same forward). Judge on 05d_coc_intervention.py.
-  # RUN 8: OFF (was 0.3). It removed 30% of the CoC targets to teach the token
-  # head to read the CoC, and D-045/D-046 showed that head reads its prefix
-  # regardless. The CoC is the deliverable (D-047); it gets every target.
   image_dropout: 0.0
-  # Drop TRAIN windows whose teacher CoC is flatly contradicted by the driver's
-  # future (data/grounding.py, strict scale of eval/gt_reward.py): FOLLOW/KEEP
-  # while the driver braked hard from speed (11.3% of the cache), STOP with no
-  # stop (3.0%), opposite turn direction (1.5%), TURN/ACCELERATE/SLOW/YIELD
-  # contradicted by kinematics (3.1%) - ~18% in all. Pairing those with the GT
-  # trajectory would train "say one thing, do another". Soft cases (ADAPT_SPEED
-  # on held speed, unparsed traces, silence on a turn) stay. Gate/val: unfiltered.
   filter_contradictions: true
-  # RUN 7b (D-044): jitter the teacher-forced GT prefix. Run 7 as launched (job
-  # 332) put the CLEAN GT stream in the prefix and by step 120 the teacher-forced
-  # gt_soft sat at 3.4-3.5 nats against a 3.21 floor, while the free decode was a
-  # random walk: epoch-0 gate 4.44 m (run 4: 2.75), intervention probe 10 m
-  # single-sample ADE with a 53-degree within-window heading spread, and "stop"
-  # ending at 9.8 m/s. A 10 Hz curvature/accel trace is smooth, so "next bin =
-  # previous bin" satisfies the loss and nothing anchors the plan on the scene;
-  # at decode time each sampled error feeds the next step. Run 4 escaped this by
-  # accident: its GT target sat on a TEACHER prefix, which copying cannot fit.
-  # Per window sigma ~ U(0, this) bins; per prefix bin an independent N(0, sigma)
-  # offset, rounded, clipped. The loss target stays the clean cached GT bin. 16
-  # bins ~ 2.7x the target's own sigma (6): the model must tolerate prefixes that
-  # are wrong by more than it is ever asked to be. Train only; the gate decodes
-  # from its own samples as before. 0 restores run 7's launched behaviour.
-  # RUN 7c (D-045): 16 -> 64, plus whole-prefix masking below. Measured on 7b's
-  # epoch-0 checkpoint (05e_traj_dependence.py, 40 val windows, teacher-forced
-  # soft CE): zeroing the frames cost 0.000 nats, swapping the CoC to a wrong
-  # maneuver 0.002 (0.03 at the first 8 positions), jitter at 16 cost 0.52 and at
-  # 64 cost 2.2. The prefix (and history) was the ONLY source the model read, so
-  # image dropout had nothing to remove and sigma 16 was a nuisance the model
-  # absorbed. 64 is the level the probe showed actually hurts.
   prefix_noise_bins: 64.0
-  # Probability that a train window's WHOLE prefix is the `<|traj_history|>`
-  # placeholder id (context.PREFIX_MASK): every bin predicted from scene + CoC +
-  # route + history, no prefix at all. Mixed with the jittered and (at sigma ~ 0)
-  # near-clean windows above, so the model learns both to plan without a prefix
-  # and to stay smooth with one; at decode it always has its own prefix. The
-  # 05e probe is the check: `no_img` and `swap_coc` must cost something.
   prefix_mask_prob: 0.25
   loss_weights:
-    traj_kl: 0.0                             # RUN 7: OFF (was 1.0). The teacher's curvature
-                                             # top-k is conditioned on ITS prefix, and the
-                                             # trajectory target is now the driver's. Still
-                                             # logged (`traj`, `traj_accel`) under no_grad,
-                                             # off-policy - read it as a drift indicator only.
-    traj_kl_accel: 0.0                       # RUN 7: OFF (was 0.1). Same reason.
-    text_kl: 1.0                             # unchanged. Do not raise: 243 drove train text
-                                             # to 0.003 while val CoC NLL ROSE (0.648 -> 0.921).
-    feat: 0.0                                # inert (D-033) and, at 1 camera, mis-pooled;
-                                             # left off at 4 cameras too - not load-bearing.
-    gt_ce: 1.0                               # RUN 7: ON, flat (was 0.0; run 4 ramped 0.5 ->
-                                             # 1.5). Soft target (gt_traj_soft_ce, sigma
-                                             # below): CE against a Gaussian over the bins
-                                             # neighbouring the GT bin, the shape D-035 found
-                                             # a one-hot over 3000 bins cannot learn. Floors
-                                             # at ~3.21 nats, NOT 0 - do not read a plateau
-                                             # there as failure; `gt` logs the one-hot CE.
-                                             # No `gt_ce_end`: no ramp. Do not add one.
-    struct_ce: 0.5                           # unchanged: CE on `<|cot_end|><|traj_future_start|>`
-                                             # so the CoC terminates (D-034).
-  gt_soft_sigma_bins: 6.0                    # run 4: sigma of the GT anchor's Gaussian, in bins,
-                                             # truncated at +/-3 sigma, renormalised at the
-                                             # region edges.
+    traj_kl: 0.0
+    traj_kl_accel: 0.0
+    text_kl: 1.0
+    feat: 0.0
+    gt_ce: 1.0
+    struct_ce: 0.5
+  gt_soft_sigma_bins: 6.0
   feat_warmup_frac: 0.1
-  select_on: coc_gt                          # RUN 8 (D-047/D-050): select the epoch on the DRIVER-
-                                             # grounded free-running CoC score - GT-consistent
-                                             # minus GT false-clear over `coc_gt_windows` val
-                                             # windows (train_stage1._coc_gt, the same scorer
-                                             # phase 1.5 selects on). minADE picked 7c's epoch 3,
-                                             # the worst epoch on that table; the best (epoch 1)
-                                             # was overwritten. `minade` | `coc_nll` still work.
-  coc_gt_windows: 400                        # RUN 8, NEW: val windows free-run per epoch for
-                                             # the score above (~10 min/epoch at 400). 0 disables it
-                                             # (and `select_on: coc_gt` then errors out). 400, not the
-                                             # 200 of the D-051 recipe: at lr 1e-4 neighbouring epochs
-                                             # differ by less, and the CoC is sampled (T 0.6) with a
-                                             # draw-to-draw spread of ~0.06 on the sub-rows
-                                             # (D-052 addendum 2) - the selector must not pick noise.
-                                             # 400 is what the RL trainer's val eval uses.
+  select_on: coc_gt                          # coc_gt | minade | coc_nll
+  coc_gt_windows: 400
   coc_gt_max_new_tokens: 64
-  early_stop_patience: 3                     # RUN 8: back to 3. At lr 1e-4 the per-epoch move is
-                                             # small enough that two flat evals in a row can be the
-                                             # sampling noise of the score rather than a real plateau.
-  save_every_epoch: true                     # RUN 7, NEW: adapters (~75 MB) at every epoch
-                                             # under runs/stage1/run-<job>/epoch-NN, so any
-                                             # epoch can be free-run scored (05b) and
-                                             # intervention-tested (05d) after the fact.
-  # Maneuver-stratified sampling (D-036, data/sampling.py). OFF since the run-6
-  # outcome: the reweighted marginal was learned at epoch 0 and the collapse
-  # returned at epoch 1; the collapse is a perception limit, not a frequency.
-  # Kept for a later ablation.
+  early_stop_patience: 3
+  save_every_epoch: true
   maneuver_sampling:
     enabled: false
     alpha: 0.5
 
-# PHASE 1.5 (D-037): GRPO on the AR tower's chain-of-causation. Separate from
-# phase 2's DiffGRPO on the flow head. Why RL here at all: `text_kl` is hard-label
-# CE on ONE sampled teacher trace, and 05c/05b measured the student holding only
-# ~0.1-0.25 on the teacher's verb where the teacher commits (nudge / adapt / lane
-# change) - an under-sharpened conditional that CE cannot sharpen and that
-# group-relative reward can. It is also how the teacher got its own CoC
-# (Alpamayo 1.5: RL with a reasoning reward on the chain-of-causation).
-# Runs on one GPU, no vLLM: 2B student, ~14-token rollouts, cache-only inputs.
-#   python -m distill.train_grpo_coc --smoke        # Ada, ~15 min
-#   sbatch scripts/03c_grpo_coc.sh                  # Blackwell
 stage1_rl:
-  # RUN 2 of the RL stage (D-038). Run 1 (job 316) on the teacher-match reward
-  # fixed the collapse by step 75 and then learned the teacher's narration:
-  # object recall up, precision down, GT-consistency down, SLOW/YIELD/TURN
-  # 40-80% OVER the teacher's rate. Measured against the driver's own future,
-  # the teacher's hazard mentions predict nothing (70% vs 69% reaction rate with
-  # vs without one) and its turn direction is opposite 17% of the time (no
-  # route). So: grade against what the driver did and tell the student the route.
-  # RUN 2 FOLLOWS THE RECIPE'S SHAPE (D-039): the rollout is CoC + trajectory
-  # tokens in one completion (`generate_coc_and_traj`), and the primary reward is
-  # the decoded trajectory's ADE against the driver's future - the CoC earns
-  # credit through the plan it leads to, which is how alpamayo1_x_rl trains it.
-  # The kinematic / direction text checks stay as small shaping terms and as
-  # teacher-free EVALUATION metrics; they are no longer the objective.
-  # RUN 3 (user, 2026-09-14): the same recipe on the FOUR cameras the labels were
-  # made with. Run 2 (job 317, 1 camera, run-314 init): val ADE 5.26 -> 4.54 m,
-  # route read 0.08 -> 0.50, FOLLOW 79 -> 49 / LANE_CHANGE 2 -> 21 on 200 windows;
-  # GT-consistency of the stated maneuver flat at ~0.70. Run 3 asks how much of
-  # the remaining gap is the single view. Same reward, same route hint.
-  # RUN 4 (2026-09-15, D-040): run 3 (job 320) moved val ADE 3.79 -> ~3.4-3.7 m
-  # and the CoC not at all (FOLLOW 53 at every check, route read 0.18 flat), and
-  # 05d_coc_intervention shows why: the student's plan does not depend on its
-  # own CoC (forcing "turn left" vs "turn right" moves the decoded heading 2-6
-  # deg; "stop" vs "accelerate" moves end speed 0-1.4 m/s). One ADE advantage on
-  # both spans trains the trajectory tokens and feeds the CoC noise. So: reward
-  # mode `perspan` - two rewards per joint rollout, each group-normalised on its
-  # own: ADE -> the trajectory span, the GT-grounded text rules -> the CoC span,
-  # and a SELF-CONSISTENCY term (the stated maneuver/direction scored against the
-  # kinematics of the student's own decoded plan) on both - the one term that
-  # builds the coupling instead of assuming it. The CoC is sampled at T=1.0 in
-  # rollouts so the sharp 4-camera student's 16 rollouts differ; val keeps 0.6.
-  # RUN 5 (2026-09-17, D-042). Run 4 (job 325) was stopped at step 75/200: flat,
-  # for a reason that is not the reward's shape. Measured there, ONE LoRA delta
-  # norm is identical to run 3's at the same step (0.148 vs 0.150 at step 50) but
-  # the resulting KL is 5-10x below the 1-camera runs that moved metrics (run 1
-  # 0.0050, run 2 0.0025, runs 3/4 0.00044/0.00047 at steps 51-75). The 4-camera
-  # init absorbs the same parameter displacement with far less change in its
-  # output distribution, so at lr 1e-5 NO reward is observable. TWO changes are
-  # therefore made together - the rate is what makes the reward legible:
-  #   1. lr 1e-5 -> 5e-5 (delta scales with lr, KL with delta^2: projects to
-  #      ~0.04 at step 200, just past run 2's proven 0.025 endpoint).
-  #   2. the CoC reward drops to its grounded subset: hazard 0.5 -> 0 and
-  #      teacher 0.25 -> 0 (see gt_reward.hazard_term / D-042 - together they
-  #      were 54% of the positive reward and both pay for narration), and `kin`
-  #      moves to the hedge-free `strict` scale.
-  # Also eval_windows 150 -> 400: two evaluations of the IDENTICAL checkpoint
-  # (run 3 step 0 vs run 4 step 0) differed by 0.08 gt_score and 0.35 m ADE, so
-  # 150-window selection was a lottery. 400 cuts that to ~0.05.
-  # RL RUN 6 (proposed 2026-09-18, D-047): from run 7c's epoch-1 checkpoint (job
-  # 336, `run-336/best`: GT false-clear 0.164, direction ok 0.417, best of any SFT
-  # run on the driver-grounded table). CoC-ONLY rollouts (`reward.mode: gt`): the
-  # trajectory span is not rolled out or rewarded, because the phase-1 deliverable
-  # is a CoC that matches the driver (user, 2026-09-18) and the flow head makes
-  # the real trajectory in phase 2. The reward grades the words against the
-  # driver's kinematics on the strict scale: +1 a checkable claim that held, 0
-  # unverifiable, -1 contradicted; direction against the turn taken; hazard and
-  # teacher-match at 0 (D-042). This is the lever that can move "driver braked ->
-  # CoC says slow/stop" ABOVE the teacher's own 0.16-0.65, which SFT cannot.
-  init_ckpt: /data/vla/alpamayo2edge/runs/stage1/run-351/best
-                                             # merged); fresh r48 attention adapters on top are
-                                             # the policy, the merged weights the reference.
-                                             # RUN 7: SFT run 8 = job 351 epoch 1 (D-057), replacing
-                                             # run-336/best (7c epoch 3). Better init on the rows RL
-                                             # is judged by: false-clear .240 vs .275, direction .287
-                                             # vs .107, hard brakes .162 vs .129 (2 draws, full val).
-  run_name: rl-run-7b-coc-grounded         # RL run 7b (D-059): run 7's recipe, init and SEED unchanged,
-                                           # stopped at 50 steps with evals every 5. Run 7 only sampled
-                                           # steps 0 and 25 before step 50, and step 25 already had the
-                                           # whole braking gain (D-058) while false-clear rises with
-                                           # training - the 0-50 trade curve is unmeasured. Same seed, so
-                                           # steps here reproduce run 7's trajectory. 6c = 343, 6b = 340,
-                                           # 6 = 337, 7 = 352; their dirs stay where they are.
+  init_ckpt: ${paths.runs_root}/stage1/best
+  run_name: grpo-coc
   cameras: [camera_cross_left_120fov, camera_front_wide_120fov, camera_cross_right_120fov,
-            camera_front_tele_30fov]         # RL-only override of data.cameras (1 cam for SFT)
-  route_hint: true                           # <|route_start|>Turn left ahead<|route_end|> etc.,
-                                             # derived from gt_future_xyz (direction only)
+            camera_front_tele_30fov]
+  route_hint: true
   group_size: 16
-  prompts_per_step: 8                        # joint rollouts are ~145 tokens, not ~14: half the
-                                             # prompts per step to hold the step near 3-4 min
+  prompts_per_step: 8
   prompt_alpha: 0.5
-  steps: 50                                 # run 1 had what it could get by ~75-150 steps
-  traj_loss_weight: 1.0                      # trajectory span's PG term relative to the CoC's
-                                             # (each span is mean-normalised on its own)
-  score_chunk: 4                             # rows per scoring forward (grad accumulation); 4 cams
-                                             # make a row ~3x longer than 1 cam (run 2 used 8 at
-                                             # 42 GB on the Blackwell)
-  lr: 3.0e-5                               # RL run 6c (D-050): 2e-5 -> 3e-5; 6b's KL stayed 10x under run 6's.
-                                           # RL run 6b (D-049): was 5e-5 - run 6's per-step KL ran 0.04-0.28,
-                                           # 10-50x the runs that held their gains, and it gamed the
-                                           # reward from step 75. The step-25 gains need no speed.
-                                             # 0.0005 nats in 50 steps and nothing is measurable
+  steps: 50
+  traj_loss_weight: 1.0
+  score_chunk: 4
+  lr: 3.0e-5
   grad_clip: 1.0
   kl_beta: 0.03
   ce_aux: 0.1
   temperature: 0.6
   top_p: 0.98
-  coc_temperature: 1.0                       # run 4: CoC phase of the ROLLOUT only. The trajectory
-                                             # bins and every val decode stay at `temperature`
+  coc_temperature: 1.0
   max_new_tokens: 64
   eval_every: 5
-  eval_windows: 400                          # each val window decodes a trajectory on 4-camera
-                                             # contexts (~3x run 2's cost per window). 150 gave a
-                                             # +/-0.08 gt_score noise floor, measured by evaluating
-                                             # one checkpoint twice; 400 gives ~0.05 for ~1 h more
-                                             # over the run. Final calls still get 500 offline
-  select_on: gt_score                        # run 4: the CoC is what this run is for (run 3
-                                             # selected on neg_ade and its val curve was flat
-                                             # noise, +/-0.3 m on 150 windows). ADE is logged
-                                             # alongside; every eval also keeps its adapters
+  eval_windows: 400
+  select_on: gt_score
   seed: 0
   reward:
-    mode: gt                                 # RL run 6: CoC-only rollouts, driver-grounded text reward (was perspan)
-    strict: true                             # RL run 6, NEW: hedge-free kinematic scale in `gt` mode too (D-042)
-    unverifiable: -0.25                      # RL run 6c (D-050): was 0.0 in 6b. Flat charge for NUDGE under `strict`
-                                           # (gt_reward.UNVERIFIABLE_STRICT). Run 6b's val NUDGE count went
-                                           # 50 -> 71 -> 85 -> 108 of 400 by step 75 once SLOW was charged:
-                                           # the last claim that never scores below 0 becomes the hedge.
-                                           # 0.0 = run 6b's behaviour.
-                                             # | gt (text rules) | teacher (run 1's grader)
-    self_consistency: 0.5                    # perspan only: x (kinematic + direction term of the
-                                             # CoC against the student's OWN decoded plan), in
-                                             # [-2, 2]; added to BOTH spans' rewards. 0.5 puts it
-                                             # at the ADE term's scale on the trajectory side
-    ade: 1.0                                 # x (-min(ADE, ade_cap) / ade_cap), in [-1, 0]
-    ade_cap: 8.0                             # the recipe gates at 3 m; here it is a CAP, and a
-                                             # high one: the token path lives at 3-5 m (teacher's
-                                             # own: 3.77 m ADE_1 on the gate windows; SFT val
-                                             # single-sample 4.5 m), and a 3 m cap saturated the
-                                             # term at -1 for most samples in the smoke - the gate
-                                             # problem re-entering. 8 m keeps within-group ADE
-                                             # differences carrying gradient; past 8 m the plan is
-                                             # garbage either way
-    # CoC-span reward (perspan) / shaping terms (traj). Run 4 uses the `gt`
-    # grader's weights: in perspan mode these ARE the CoC's objective, and at
-    # run 3's 0.25 they would be swamped by the self-consistency term.
-    kin: 1.0                                 # stated maneuver vs the driver's speed/path, on the
-                                             # hedge-free `strict` scale (D-042): FOLLOW/KEEP no
-                                             # longer collect +0.5 for an uneventful window (74% of
-                                             # them) and ADAPT_SPEED drops to +0.5 so it cannot tie
-                                             # a correct specific claim (it did in 63% of windows)
-    dir: 0.5                                 # stated direction vs the direction taken
-    hazard: 0.0                              # OFF (D-042). `reacted` is true in 73% of val
-                                             # windows, so within a group this is a +0.69 bounty
-                                             # on naming any object - D-038's narration failure
-                                             # from the GT side. Kept as the metric only
-    teacher: 0.0                             # OFF (D-042). Was 29% of run 4's positive CoC
-                                             # reward, for agreeing with a trace whose turn
-                                             # direction is opposite 17% of the time (D-038)
-    # run-1 grader fields, still read when mode: teacher
+    mode: gt                                 # gt | perspan | teacher
+    strict: true
+    unverifiable: -0.25
+    self_consistency: 0.5
+    ade: 1.0
+    ade_cap: 8.0
+    kin: 1.0
+    dir: 0.5
+    hazard: 0.0
+    teacher: 0.0
     maneuver: 1.0
     direction: 0.5
     objects: 0.5
     false_clear: 1.0
-    fail: -2.0                               # unterminated CoC or no trajectory: below any success
+    fail: -2.0
     max_tokens: 48
 
 stage2:
-  # PHASE 2 (2026-09-28): the flow head is trained on Bench2Drive expert
-  # trajectories (`dataset: bench2drive`, `supervision: gt_flow` - there is no
-  # teacher-flow cache for CARLA data) from the best CoC checkpoint (RL run 7
-  # step 25 = adapters on run-351/best, D-058/D-059), gen tower FULLY fine-tuned
-  # (student.lora.stage2.enabled: false). The PhysicalAI-AV teacher-flow path
-  # (`dataset: physicalai`, `supervision: teacher_flow`, D-007) stays as the
-  # comparison arm; both run through the same trainer.
-  dataset: bench2drive                       # physicalai (cached teacher tuples) | bench2drive
+  dataset: bench2drive                       # physicalai | bench2drive
   coc_cache: /bulk/users/vla/alpamayo2edge/b2d_cache/coc_rl7s25.jsonl
-                                             # bench2drive only: the CoC the flow head conditions
-                                             # on, generated offline by scripts/05j_b2d_coc.py
-                                             # with the init checkpoint (RL7 step 25). null =
-                                             # free-running prompt, i.e. NO CoC in the context.
-  supervision: gt_flow                       # teacher_flow (D-007, physicalai only) | gt_flow
-  init_ckpt: /data/vla/alpamayo2edge/runs/stage1/run-351/best   # merged stage-1 checkpoint
-  init_adapters: /data/vla/alpamayo2edge/runs/stage1_rl/rl-run-7-coc-grounded/step-0025
-                                             # RL adapters folded into the AR tower before
-                                             # stage 2 starts (null = the init_ckpt as is)
+  supervision: gt_flow                       # teacher_flow | gt_flow
+  init_ckpt: ${paths.runs_root}/stage1/run-351/best
+  init_adapters: ${paths.runs_root}/stage1_rl/rl-run-7-coc-grounded/step-0025
   epochs: 8
-  micro_batch: 2                             # windows per micro-batch (x k_samples flow samples).
-                                             # RUN 3: 8 -> 2 because the AR-tower graph is kept
-                                             # (no checkpointing on reasoner_forward): stage 1
-                                             # measured ~12 GiB/window of reasoner activations.
-  grad_accum: 16                             # effective batch held at 32
+  micro_batch: 2
+  grad_accum: 16
   lr: 5.0e-5
   warmup_frac: 0.03
   weight_decay: 0.0
-  grad_checkpoint: true                      # per-layer checkpointing of the gen pathway
-  fp32_master: true                          # full FT: promote trainable tensors to fp32
-  k_samples: 8                               # (t, a0) draws per window when the data has no
-                                             # cached teacher tuples (gt_flow on bench2drive)
-  t_sampler: beta                            # RUN 5: beta = the teacher's training law (D-012),
-                                             # s ~ Beta(1.5, 1), t = 0.999 (1 - s), stratified via
-                                             # the inverse CDF: mean t 0.40 (uniform 0.50), 28% of
-                                             # draws at t < 0.2 (uniform 20%) - more weight on the
-                                             # high-noise end where the sampler picks go vs stay.
-                                             # | stratified (runs 1-4: uniform over [0, 0.999))
-                                             # | logitnormal (unshifted; NOT what Edge trains actions
-                                             # with - that is the video's waver + shift 5)
-  sample_steps: 10                           # Euler steps of the eval sampler (A1.5 default)
-  run_name: sft-run-5-b2d-tbeta-t0gate      # runs/stage2/<run_name>/epoch<N> + best -> lowest gate_metric
-                                             # RUN 5 (2026-10-05) = run 4 + t_sampler beta + gate on
-                                             # T0 ADE; buckets OFF (one change at a time). The context
-                                             # probe (05o) showed depart/brake ARE decodable from the
-                                             # K/V the head reads (AUC 0.83-0.86 vs ego 0.63-0.70).
-  buckets:                                   # bucketed sampling of the train
-    enabled: false                           # windows (data/b2d_buckets.py; table written by
-    share:                                   # scripts/01e_b2d_buckets.py). Probability of drawing
-      standing: 0.05                         # each bucket; uniform inside a bucket; the epoch
-      start: 0.18                            # keeps its length. false = runs 1-4's uniform
-      hard_brake: 0.12                       # shuffle. Natural mix (8,040 windows): standing
-      to_stop: 0.13                          # 24.8%, start 15.9%, hard_brake 7.8%, to_stop 9.2%,
-      brake: 0.10                            # brake 4.0%, turn 15.9%, accel 5.4%, cruise 17.1%.
-      turn: 0.18                             # The val gate is never resampled.
+  grad_checkpoint: true
+  fp32_master: true
+  k_samples: 8
+  t_sampler: beta                            # beta | stratified | logitnormal
+  sample_steps: 10
+  run_name: sft-run-5-b2d-tbeta-t0gate
+  buckets:
+    enabled: false
+    share:
+      standing: 0.05
+      start: 0.18
+      hard_brake: 0.12
+      to_stop: 0.13
+      brake: 0.10
+      turn: 0.18
       accel: 0.12
       cruise: 0.12
-  gate_windows: 863                          # val windows scored after every epoch. RUN 4: the full
-                                             # val (was 160): run 3's 160-window gate read 1.63 / 1.66 m
-                                             # for epochs 5 / 7 that are 1.84 / 1.94 m on the full val.
+  gate_windows: 863
   gate_k: 6
-  gate_metric: t0_ade                        # what `best` is chosen on: t0_ade = the deterministic
-                                             # x0 = 0 sample the car drives (paired, one extra
-                                             # sample per window) | minade (runs 1-4: best-of-k,
-                                             # which rewards covering go AND stay - 2026-10-05
-                                             # probe: best-of-16 1.44 m vs T0 3.39 m on run 4)
+  gate_metric: t0_ade                        # t0_ade | minade
   gate_batch: 8
-  wandb: true                                # direct W&B run per job (project below); alerts on
-                                             # start / finish / failure (user request 2026-09-29)
+  wandb: true
   wandb_project: alpamayo2edge
   loss_weights:
     flow_distill: 1.0
     fm_gt: 0.5
-    # gt_flow runs (bench2drive): total = fm_gt + traj * ADE[m] + coc_ce * CE.
-    traj: 0.1                                # RUN 4: trajectory-space term, metres (see
-                                             # train_stage2.traj_space_loss). 0.1 x ~2 m is
-                                             # the size of the fm loss (0.3-0.4). 0 = off.
-    coc_ce: 1.0                              # RUN 4: CoC preservation on the AR-tower LoRA
-                                             # (run 3 broke the CoC: 27% unterminated).
-                                             # Only active with student.lora.stage2_ar. 0 = off.
-  traj_loss_t_power: 1.0                     # weight t^p on the trajectory term (t = data weight)
-  anneal_to_gt_frac: 0.2                     # last 20%: ramp fm_gt up, flow_distill down
-  scheduled_sampling_start_frac: 0.5         # after 50%: condition on student-sampled traj tokens
-                                             # (physicalai only; the flow context masks the
-                                             # future bins anyway - see flow_path.py)
+    traj: 0.1
+    coc_ce: 1.0
+  traj_loss_t_power: 1.0
+  anneal_to_gt_frac: 0.2
+  scheduled_sampling_start_frac: 0.5
 
 eval:
   horizon_s: 6.4
   minade_k: 6
-  # The gate decodes 128 tokens x minade_k modes per window at batch 1 (see
-  # eval/coarse_minade.py for why batch 1), so it is minutes, not seconds. Cap
-  # the window count to keep a per-epoch signal cheap; null = the whole split.
   gate_max_windows: 60
-  challenging_split: challenging_v1          # NVIDIA's hard samples, held out from training
-                                             # NOTE: unused - the PhysicalAI-AV metadata
-                                             # carries no such flag, so split_challenging.json
-                                             # is the long-tail STRATA of the val split
-                                             # (data/splits.py). Rename or wire when a real
-                                             # challenging-split id list exists.
-  # Retention (D-025, TRAINING_STRATEGY §4): half the headline result, not hygiene.
-  # Baseline is cached from the UNTRAINED Edge checkpoint once, so base and
-  # trained never have to be resident together.
+  challenging_split: challenging_v1
   retention:
     baseline_dir: /data/vla/alpamayo2edge/runs/retention_base
     probe_file: src/distill/eval/probes/general_probes.json
     max_new_tokens: 64
-    # Gen-tower denoising retention on non-AV clips. Leave null to skip that
-    # half with a warning; any directory of short mp4/webm clips works.
     generic_clips_dir: null
     n_generic_clips: 16
     flow_probe_timesteps: [0.1, 0.3, 0.5, 0.7, 0.9]
     seed: 0
-
-# NOTE: no EMA anywhere by design (TRAINING_STRATEGY §3). NVIDIA's Edge recipe
-# enables it, but that is an 8-GPU config with fsdp_master_dtype float32; here it
-# would cost a full extra weight copy for no benefit at LoRA scale.

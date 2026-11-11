@@ -1,12 +1,4 @@
-"""Offline teacher labeling pass (plan Phase 1, v2 amendments).
-
-One npz shard per training window under cache_root/<clip_id>/<window_idx>.npz.
-Storage per window is O(kilobytes) - flow targets are cached instead of KV
-(the design change that makes single-GPU stage 2 pure supervised regression).
-
-Resumable: existing shards are skipped, so the 500 -> 2000 -> 5000 increments
-are just re-runs with a larger curated list.
-"""
+"""Offline teacher labeling pass, one resumable npz shard per window."""
 from __future__ import annotations
 import collections
 import os
@@ -41,10 +33,7 @@ class _Item:
 
 @dataclasses.dataclass
 class _Timing:
-    """Where the wall clock goes, per phase. `wait` is the one that matters when
-    tuning the prefetch pool: it is the part of `fetch` that did NOT hide behind
-    teacher compute, so wait -> 0 means streaming is fully overlapped and the run
-    is finally GPU-bound."""
+    """Per-phase wall-clock timing."""
     fetch: float = 0.0     # summed load_window duration (cost, across threads)
     wait: float = 0.0      # main thread blocked on the next window (unhidden)
     teacher: float = 0.0
@@ -60,12 +49,7 @@ class _Timing:
 
 def plan_work(cfg, cache_root: Path, clip_ids: list[str],
               cache_frames: bool) -> tuple[list[_Item], int]:
-    """Filesystem-only scan of what needs doing. Streams nothing.
-
-    Keeping this ahead of the fetch pool is what preserves free resume: only
-    windows that need work are ever submitted, so `--n 2000` does not re-stream
-    the 500 clips it already has. Pinned by tests/test_labeler_resume_offline.py.
-    """
+    """Filesystem-only scan of windows that still need labeling."""
     t0s = window_t0s_us(cfg)
     work: list[_Item] = []
     skipped = 0
@@ -74,9 +58,7 @@ def plan_work(cfg, cache_root: Path, clip_ids: list[str],
             path = shard_path(cache_root, clip_id, w_idx)
             in_path = frames.input_path(cache_root, clip_id, w_idx)
             need_shard = not path.exists()
-            # The student's inputs are written even when the teacher targets are
-            # already cached: an older cache predates this file, and re-streaming
-            # the clip once now beats re-streaming it every epoch later.
+            # Write student inputs even if teacher targets are cached.
             need_input = cache_frames and not in_path.exists()
             if not need_shard and not need_input:
                 skipped += 1
@@ -93,26 +75,7 @@ def _timed_load(cfg, item: _Item):
 
 
 def iter_windows_prefetched(cfg, work: list[_Item], workers: int, depth: int):
-    """Yield (item, window, fetch_s, wait_s) in list order, with up to `depth`
-    windows in flight.
-
-    Streaming is network-bound and the teacher is GPU-bound, so they overlap
-    almost perfectly; the loader itself is NVIDIA's `load_physical_aiavdataset`
-    and fetches its cameras serially, which is why the concurrency has to live
-    at the window level rather than the camera level.
-
-    Order is preserved deliberately. Shards are keyed by (clip_id, w_idx) so
-    correctness does not need it, but in-order consumption bounds memory to
-    `depth` decoded windows and keeps the log readable against the curated list.
-    `workers <= 1` takes the plain serial path - the one to use when debugging,
-    since a traceback from a pool thread loses the enclosing context.
-
-    Yields `window=None, err=<exception>` for a window that could not be
-    fetched rather than raising: `huggingface_hub` already retries 5x, and a
-    fetch that fails past that is a bad clip or a network blip, not a reason to
-    lose a 27-hour run. Nothing is written for a failed window, so the next run
-    simply picks it up again.
-    """
+    """Yield (item, window, fetch_s, wait_s) in order, with up to `depth` windows in flight."""
     if workers <= 1:
         for item in work:
             t = time.perf_counter()
@@ -153,18 +116,10 @@ def shard_path(cache_root: Path, clip_id: str, window_idx: int) -> Path:
 
 
 def atomic_savez(path: Path, compressed: bool, **arrays) -> None:
-    """Write an npz that is either complete or absent, never half-written.
-
-    Resume keys off `path.exists()`, so a shard truncated by a kill mid-write is
-    worse than a missing one: it is skipped forever and only surfaces later as a
-    loader error, by which point the run that produced it is long gone. Same
-    directory for the temp file so `os.replace` is a same-filesystem rename,
-    which POSIX makes atomic.
-    """
+    """Write an npz atomically via temp file + os.replace."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    # np.savez appends '.npz' unless the name already ends in it, so name the
-    # temp file accordingly and let it write exactly where we expect.
+    # np.savez appends .npz unless already present.
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp.npz")
     try:
         (np.savez_compressed if compressed else np.savez)(tmp, **arrays)
@@ -203,9 +158,6 @@ def run_labeling(cfg, clip_ids: list[str]) -> None:
     cache_frames = bool(cfg.data.get("cache_student_frames", True))
     quality = int(cfg.data.get("frame_jpeg_quality", 92))
     workers = int(cfg.teacher.get("prefetch_workers", 4))
-    # One more in flight than there are fetchers, so a worker never idles waiting
-    # for the main thread to consume. Each in-flight window holds decoded frames,
-    # so this is the memory knob as well as the throughput one.
     depth = int(cfg.teacher.get("prefetch_depth", max(workers + 2, 2)))
 
     work, skipped = plan_work(cfg, cache_root, clip_ids, cache_frames)
@@ -213,12 +165,7 @@ def run_labeling(cfg, clip_ids: list[str]) -> None:
     log.info("labeling %d windows (%d already cached, %d total) | "
              "prefetch workers=%d depth=%d", len(work), skipped, total, workers, depth)
 
-    # A run this long is unattended by definition, so one bad window must not end
-    # it. Nothing is written for a failure, so the next run retries it for free.
-    # `max_consecutive_failures` is the circuit breaker: scattered failures are
-    # the network, but a solid run of them is systemic (expired token, full disk,
-    # dead GPU) and grinding through 9,861 windows writing nothing is worse than
-    # stopping.
+    # Skip failed windows; stop after too many consecutive failures.
     max_consecutive = int(cfg.teacher.get("max_consecutive_failures", 25))
     failed: list[tuple[str, int, str]] = []
     consecutive = 0
@@ -279,10 +226,6 @@ def run_labeling(cfg, clip_ids: list[str]) -> None:
         wall = time.time() - t0
         log.info("done: %d windows in %.2f h (%.1f s/window) | %s",
                  done, wall / 3600, wall / done, tm.line(done))
-        # fetch/wall is the honest speedup readout: at workers=1 it sits near the
-        # fraction of the run spent streaming; with the pool working it can exceed
-        # 1.0, which just means more than one window-second of fetching happened
-        # per second of wall clock.
         log.info("streaming overlap: %.1fx (%.0f s fetched / %.0f s wall), "
                  "unhidden wait %.0f%% of wall",
                  tm.fetch / max(wall, 1e-6), tm.fetch, wall,

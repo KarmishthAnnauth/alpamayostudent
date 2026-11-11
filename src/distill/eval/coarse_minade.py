@@ -1,31 +1,4 @@
-"""Coarse minADE: decode the AR tower's discrete trajectory tokens straight to
-waypoints via the teacher's detokenizer - no diffusion tower. This is the
-stage 1 quality gate (plan 3.3): if the coarse plan is bad, stage 2 refinement
-cannot save it, and you find out days earlier.
-
-Three things about the protocol, because each of them was wrong until
-2026-08-24 and each fails quietly rather than loudly:
-
-**The trajectory is generated, the CoC is teacher-forced.** The context is built
-with `for_generation=True`, so it ends at `<|traj_future_start|>` and the 128
-positions are the student's own. The previous version generated from the
-TEACHER-FORCED context, i.e. with the teacher's trajectory tokens already in the
-prompt. The CoC stays forced on purpose: it keeps the gate comparable across
-epochs and matches the training context exactly, at the cost of not measuring
-the student's own reasoning. The free-running two-phase decode (CoC, then
-trajectory) belongs in the final eval, `scripts/05_eval.py`, not in a
-once-per-epoch early-stopping signal.
-
-**Batch size is 1.** `collate_student` right-pads, which is correct for a
-teacher-forced forward pass but not for a prefill: with B>1 every shorter sample
-would decode its first token after a run of padding. One window at a time costs
-wall-clock and buys a number that means something.
-
-**Detokenization goes through `student.detokenize_traj`**, which applies D-031's
-`swap_action_dims`. Calling the tokenizer's `decode` directly - which is what
-`student.traj_detokenize` used to be - reads the two action dims transposed and
-costs 20-128 m of ADE that looks exactly like a student that failed to learn.
-"""
+"""Stage-1 gate: minADE of the AR tower's decoded trajectory tokens (CoC teacher-forced, batch 1)."""
 from __future__ import annotations
 import functools
 import logging
@@ -47,8 +20,7 @@ def coarse_minade(cfg, student, split: str = "challenging", k: int = 6,
                        clip_ids=_split_clips(cfg, split),
                        for_generation=True)
     if max_windows is not None and len(ds) > max_windows:
-        # Deterministic prefix, not a random sample: the gate is compared against
-        # itself across epochs, so the window set must not move between them.
+        # fixed prefix so the gate is comparable across epochs
         ds = torch.utils.data.Subset(ds, range(max_windows))
     dl = DataLoader(ds, batch_size=1, shuffle=False, num_workers=2,
                     collate_fn=functools.partial(
@@ -56,7 +28,7 @@ def coarse_minade(cfg, student, split: str = "challenging", k: int = 6,
 
     def sample_fn(batch, k):
         modes = []
-        for _ in range(k):      # temperature sampling over trajectory tokens
+        for _ in range(k):
             tok = student.generate_traj_tokens(batch)
             modes.append(student.detokenize_traj(
                 tok, batch["hist_xyz"], batch["hist_rot"]).to(batch["gt_future_xyz"]))

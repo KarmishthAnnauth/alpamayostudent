@@ -1,11 +1,4 @@
-"""Stage-1 input assembly, without a checkpoint.
-
-The two things worth pinning here are the ones that fail silently on a GPU:
-the autoregressive shift in `gather_targets` (off by one = a model that trains
-to predict the token it was just given), and the right-padding contract in the
-student collator (`reasoner_forward` has no attention mask, so left padding
-would poison every position).
-"""
+"""Stage-1 input assembly, without a checkpoint."""
 import sys
 from pathlib import Path
 

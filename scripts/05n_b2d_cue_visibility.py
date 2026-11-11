@@ -1,37 +1,4 @@
-"""Phase 2: is the CAUSE of the expert's stop / departure visible to the model at t0?
-
-P2-15 explained the CoC's missing braking anticipation on CARLA with "scripted
-stops, often invisible 6.4 s ahead" - never tested. This tests it on the val
-windows from the Bench2Drive annotations (privileged state the model never
-gets) and splits run 4's error by the answer. CPU only.
-
-Per window (bucket from `buckets_val.json`, scripts/01e_b2d_buckets.py):
-
-  braking buckets (hard_brake, brake, to_stop): event te = first frame in
-    [t0, t0+64) where the expert's brake control > 0.1. Cause at te, first match:
-      light   a traffic light with affects_ego that is red/yellow at te
-      stop    a stop sign with affects_ego at te
-      actor   the nearest vehicle / walker inside the ego's corridor
-              (x in [0, 25] m, |y| < 2.5 m, ego frame at that frame) at any
-              frame in [te, te+2 s]
-      none    nothing found (privileged/scripted, or our heuristic missed it)
-  start: event te = first frame with speed > 0.5 m/s; cause = what held the
-    ego at te-0.5 s: red light / stop sign / actor in the corridor (x in [0, 15])
-    / none.
-
-Visibility at t0 (last input frame), deliberately generous:
-  actor   present at t0, projects inside one of the three input cameras
-          (rgb_front, rgb_front_left, rgb_front_right), distance <= 50 m
-          (walkers 35 m), lidar num_points >= 5 (occlusion proxy)
-  light   its state at t0: red/yellow at t0 = the cue is there; green at t0 =
-          it turns later (the timing is not in the frames), plus in-camera
-  stop    in camera and <= 50 m at t0
-
-    python scripts/05n_b2d_cue_visibility.py \
-        --err runs/sampler_probe/r4-epoch7-T0-k1.json \
-        --err-best runs/flow-minade-sft-run-4-b2d-arlora-traj-cocce-best-valfull.json \
-        --out runs/coc_probe/cue_visibility_val.json
-"""
+"""Check whether the cause of the expert's stop/departure is visible to the model at t0."""
 from __future__ import annotations
 import argparse
 import gzip
@@ -46,7 +13,7 @@ import numpy as np                                                  # noqa: E402
 
 from distill.data import bench2drive as b2d                         # noqa: E402
 
-CAMS = ("CAM_FRONT", "CAM_FRONT_LEFT", "CAM_FRONT_RIGHT")         # the three input cameras (P2-10)
+CAMS = ("CAM_FRONT", "CAM_FRONT_LEFT", "CAM_FRONT_RIGHT")         # input cameras
 BRAKING = ("hard_brake", "brake", "to_stop")
 RED, YELLOW, GREEN = 0, 1, 2
 H = b2d.N_FUTURE
@@ -167,7 +134,6 @@ def classify(clip: str, t0: int, bucket: str, n_frames: int) -> dict:
     row.update(cause="actor", actor_class=a["class"], actor_x=a["x"])
     row["vis"], row["why"] = visible_actor(clip, t0, a["id"])
     if row["vis"]:
-        # visible at t0, but already in the path or still outside it (cut-in / crossing intent)
         p0 = to_ego(frame(clip, t0), next(b for b in actors(frame(clip, t0)) if b["id"] == a["id"])["center"])
         row["in_path_at_t0"] = bool(abs(p0[1]) < 2.5 and p0[0] >= 0)
     return row
@@ -237,14 +203,12 @@ def main() -> int:
         if v:
             n_, e, b, s = agg(v)
             print(f"  {'-> no event found':42s} {n_:4d} {e:7.2f} {b:6.2f} {100 * s / tot_err:8.1f}%")
-        # visible actor: already in path vs entering later (intent)
         va = [r for r in rs if r.get("cause") == "actor" and r.get("vis")]
         if va:
             for ip in (True, False):
                 v = [r for r in va if r.get("in_path_at_t0") is ip]
                 n_, e, b, s = agg(v)
                 print(f"     visible actor {'already in path' if ip else 'outside path at t0':24s} {n_:4d} {e:7.2f} {b:6.2f}")
-        # onset time
         print("  by onset:", "  ".join(
             f"{lo}-{hi}s n={len(v)} T0 {np.mean([r['ade_t0'] for r in v]):.2f} vis {np.mean([bool(r.get('vis')) for r in v]):.0%}"
             for lo, hi in ((0, 1), (1, 3), (3, 6.5))

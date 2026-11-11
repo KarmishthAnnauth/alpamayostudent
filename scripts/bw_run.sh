@@ -1,9 +1,6 @@
 #!/bin/bash
-# Run a python script on the SLURM-managed Blackwell (partition main). Every
-# submission is announced to the user first (memory: gpu-etiquette).
-#
-#     sbatch [--time=HH:MM:SS --job-name=...] scripts/bw_run.sh scripts/<x>.py args...
-#
+# Run a python script on the Blackwell via SLURM.
+#     sbatch scripts/bw_run.sh scripts/<x>.py args...
 #SBATCH --job-name=a2e-bw
 #SBATCH --partition=main
 #SBATCH --gres=gpu:rtxpro6000:1

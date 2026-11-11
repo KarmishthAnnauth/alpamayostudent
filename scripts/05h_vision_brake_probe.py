@@ -1,31 +1,4 @@
-"""Do the FROZEN vision features encode that the driver is about to brake hard?
-
-The question phase 2 turns on. D-040 says the trajectory is `f(images)`, and
-D-046 says the AR tower reads the frames almost not at all (zeroing them costs
-+0.008 nats) - the model extrapolates ego history instead, which is what open-loop
-ADE rewards on a mostly-constant-speed dataset. Closed-loop DiffGRPO would punish
-that shortcut, but it can only teach the flow head to READ something the frozen
-vision pathway actually delivers: `param_groups_stage2` trains the gen tower's
-attention over a FROZEN AR tower, with SigLIP2 frozen and the projector never
-trained.
-
-So: fit a linear probe on the projected vision tokens the LM is handed
-(`prepare_multimodal_reasoner_inputs` -> `inputs_embeds[visual_pos_masks]`) and
-ask whether "the driver brakes hard / stops in the next 6.4 s" is linearly
-decodable from them.
-
-The comparison that matters is not vision vs chance - it is vision vs EGO
-HISTORY, because ego history is what the model already uses. A window where the
-car is already slowing is trivially predictable from its own speed trace; only
-the lift of (ego + vision) over (ego alone) is evidence that the frames carry the
-lead vehicle's motion.
-
-  reads out, and adds over ego     -> phase 2's closed-loop reward can find it;
-                                      the blindness is a shortcut, as D-046 read it
-  does not add over ego            -> no amount of flow-head LoRA recovers it, and
-                                      the projector / encoder has to come unfrozen
-
-Grouped by CLIP (windows of one clip overlap; an ungrouped split leaks).
+"""Linear probe: do frozen vision features predict hard braking beyond ego history?
 
     python scripts/05h_vision_brake_probe.py --n 1200 --split val
 """
@@ -69,11 +42,7 @@ def ego_features(ego_xyz: np.ndarray) -> np.ndarray:
 
 @torch.no_grad()
 def vision_features(student, batch) -> np.ndarray:
-    """Mean-pooled projected vision tokens, kept per FRAME so motion survives.
-
-    Pooling every token into one vector would average the 4 timesteps together
-    and destroy exactly the signal under test. Instead: pool within each frame,
-    then keep the frame means and their first differences."""
+    """Mean-pooled projected vision tokens per frame, plus frame-to-frame differences."""
     from cosmos_framework.model.generator.reasoner.nemotron_3_dense_vl import (
         reasoner_multimodal_utils as mm,
     )
@@ -99,8 +68,7 @@ def vision_features(student, batch) -> np.ndarray:
 
 def fit_report(X: np.ndarray, y: np.ndarray, groups: np.ndarray, name: str,
                n_pca: int | None) -> dict:
-    """Grouped CV; PCA and scaling are fit INSIDE each fold (fitting them on all
-    the data would leak the test fold's directions into the probe)."""
+    """Grouped CV with PCA and scaling fit inside each fold."""
     oof = np.zeros(len(y), dtype=float)
     n_splits = max(2, min(5, len(np.unique(groups))))
     for tr, te in GroupKFold(n_splits=n_splits).split(X, y, groups):
@@ -115,7 +83,7 @@ def fit_report(X: np.ndarray, y: np.ndarray, groups: np.ndarray, name: str,
         oof[te] = clf.predict_proba(sc.transform(Xte))[:, 1]
     auc = roc_auc_score(y, oof)
     ap = average_precision_score(y, oof)
-    # Bootstrap the AUC over CLIPS, the unit the folds respect.
+    # Bootstrap AUC over clips.
     rng = np.random.default_rng(0)
     uq = np.unique(groups)
     boots = []
@@ -161,7 +129,7 @@ def main() -> int:
     for i in range(n):
         item = ds[i]
         k = gt_reward.kinematics(item["gt_future_xyz"])
-        # The failing row of the CoC eval: a real deceleration from speed.
+        # Real deceleration from speed.
         Y.append(int(k["braked_from_speed"] and (k["vmin"] < 0.5 or k["dv"] < -2.5)))
         E.append(ego_features(np.asarray(item["hist_xyz"])))
         batch = move_batch(collate_stage1([item], pad_id))

@@ -1,16 +1,4 @@
-"""The student's coarse minADE against GT, for a checkpoint +/- RL adapters.
-
-The stage-1 gate reports `coarse_minADE_6` on the 60-window `challenging` split
-once per epoch, and `09_teacher_ceiling.py` prints the teacher's lines on those
-same windows - but nothing has ever measured an RL checkpoint's trajectory.
-Phase 1.5 is CoC-only (`traj_ade: null`, `traj_decoded: 0.0` in every val check
-of jobs 337/340/343), while its LoRA sits on the AR attention that ALSO emits the
-trajectory tokens. So "the CoC improved and the plan was untouched" is an
-assumption, not a measurement. This measures it.
-
-k matters when comparing to the teacher: the cache holds 4 action-expert samples
-per window, so the teacher line is minADE_4. Pass `--k 4` for a like-for-like
-number and `--k 6` to compare against the gate's own history.
+"""Student coarse minADE against GT for a checkpoint, optionally with RL adapters.
 
     python scripts/05i_student_minade.py --adapters <step dir> --split val --n 300 --k 4 6
 """
@@ -55,7 +43,7 @@ def main() -> int:
     meta = checkpoint.load_into(student, Path(a.ckpt))
     log.info("checkpoint: %s (epoch=%s)", a.ckpt, meta.get("epoch"))
     if a.adapters:
-        student.param_groups_stage1()                # inject, then load the adapters
+        student.param_groups_stage1()
         am = checkpoint.load_adapters(student, a.adapters)
         log.info("adapters:   %s (step=%s)", a.adapters, am.get("step"))
     student.eval()

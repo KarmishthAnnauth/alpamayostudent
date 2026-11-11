@@ -1,23 +1,6 @@
-"""Stream an already-running stage-1 training log to Weights & Biases.
+"""Tail a stage-1 training log and stream its metrics to Weights & Biases.
 
-A sidecar: it does not touch the training job, just tails its log file and
-re-emits the numbers. Use it to watch a run remotely (wandb.ai / the W&B app)
-when train_stage1.py itself has no wandb wiring.
-
-    wandb login                                  # one-time, paste key from wandb.ai/authorize
     python scripts/wandb_tail.py logs/a2e-stage1-207.out --name stage1-job207
-
-`scripts/03_train_stage1.sh` launches this automatically in the background for
-its own job, so a submitted run is watchable without anyone starting it by hand.
-Run it manually only for an old log or to re-sync a run.
-
-Resumable: re-running with the same --name re-scans from the top and de-dupes by
-step, so a killed sidecar loses nothing. Exits when the log shows the run is
-done (early stop / Finished) or --once is passed.
-
-Metrics: loss/{total,traj_kl,text_kl,struct_ce,feat,gt_ce} per step (all
-unweighted), gate/{coarse_minADE_m,val_coc_nll,val_struct_nll} per epoch, and
-weights/gt_ce per epoch when the log carries the anneal schedule (run 3+).
 """
 from __future__ import annotations
 import argparse
@@ -29,13 +12,7 @@ import wandb
 
 STEP_RE = re.compile(
     r"epoch (\d+) step (\d+)/(\d+) loss ([\d.]+) \[([^\]]*)\]")
-#: `<term> <value>` pairs inside the breakdown bracket. Parsed by NAME, not by
-#: capture-group position: run 4 added `traj_accel` and `gt_soft` to the
-#: breakdown, and the positional regex this replaced would have silently
-#: mislabelled every series after `traj` rather than failing.
 TERM_RE = re.compile(r"(\w+) (-?[\d.]+)")
-#: breakdown term -> W&B metric. `gt` keeps `loss/gt_ce` so the one-hot GT curve
-#: stays continuous with runs 1-3; run 4's trained term is `loss/gt_ce_soft`.
 TERM_METRIC = {"traj": "loss/traj_kl", "traj_accel": "loss/traj_kl_accel",
                "text": "loss/text_kl", "struct": "loss/struct_ce",
                "feat": "loss/feat", "gt_soft": "loss/gt_ce_soft",
@@ -43,9 +20,6 @@ TERM_METRIC = {"traj": "loss/traj_kl", "traj_accel": "loss/traj_kl_accel",
 GATE_RE = re.compile(
     r"epoch (\d+) challenging coarse-minADE ([\d.]+) m \| val CoC NLL ([\d.]+) "
     r"struct NLL ([\d.]+)(?: \| gt_ce_w ([\d.]+))?")
-# `no .*?improvement` because run 5 names the metric in the message
-# ("early stop: no coc_nll improvement..."); the bare run-1..4 wording
-# still matches, so old logs replay unchanged.
 DONE_RE = re.compile(r"early stop: no .*?improvement|^Finished |labeling done")
 
 
@@ -83,10 +57,6 @@ def main() -> None:
     else:
         run = wandb.init(project=a.project, name=a.name, id=a.name, resume="allow")
     if not a.once:
-        # The sbatch sidecar boots this right before the training call, so the
-        # alert lands when the SLURM job actually dispatches (mail is disabled
-        # cluster-side; --mail-type is a no-op). Delivery is opt-in per wandb
-        # account: Settings -> Alerts -> email/Slack. Never let it stop the tail.
         try:
             run.alert(title=f"{a.name} started",
                       text=f"stage-1 training dispatched; tailing {a.log.name}")
@@ -124,7 +94,7 @@ def main() -> None:
                     "gate/val_struct_nll": float(g.group(4)),
                     "gate/epoch": int(g.group(1)),
                 }
-                if g.group(5) is not None:      # gt_ce anneal schedule (run 3+)
+                if g.group(5) is not None:      # gt_ce anneal schedule
                     payload["weights/gt_ce"] = float(g.group(5))
                 run.log(payload, step=last_step)
             if DONE_RE.search(line):

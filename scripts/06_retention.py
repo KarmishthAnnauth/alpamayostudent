@@ -1,19 +1,4 @@
-"""Retention pair (D-025): the other half of the headline result.
-
-Two invocations, in this order:
-
-  # ONCE, on the untrained Cosmos3-Edge checkpoint, BEFORE stage 1:
-  python scripts/06_retention.py baseline
-
-  # after any stage-1 / stage-2 checkpoint:
-  python scripts/06_retention.py score --ckpt /data/runs/stage2/epoch7
-
-The baseline caches the base model's own greedy answers plus its top-k
-next-token log-probs, so scoring a trained checkpoint never needs both models
-resident at once (48GB card). Running `baseline` after training would measure
-the trained model against itself and always report zero drift; the script
-refuses to overwrite an existing baseline for exactly that reason.
-"""
+"""Retention check: cache base-model baseline, or score a checkpoint's drift from it."""
 import argparse, json, sys
 from pathlib import Path
 sys.path.insert(0, "src")
@@ -50,12 +35,11 @@ from distill import checkpoint
 baseline = retention.load_baseline(out)
 student = EdgeStudent(cfg).cuda().eval()
 
-# Weight drift wants the pristine tables, so snapshot them before loading the
-# trained weights in; the trained state dict is already LoRA-merged.
+# Snapshot pristine weights before loading the checkpoint.
 base_sd = {k: v.detach().to("cpu", copy=True) for k, v in student.model.state_dict().items()}
 
 traj_spec = torch.load(Path(cfg.paths.cache_root) / "traj_tokenizer_spec.pt",
-                       weights_only=False)  # pickled callables, D-032
+                       weights_only=False)
 student.extend_trajectory_vocab(traj_spec)
 checkpoint.load_into(student, a.ckpt)
 

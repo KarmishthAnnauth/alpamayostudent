@@ -1,31 +1,4 @@
-"""Where does the teacher-forced trajectory get its information? (D-044 follow-up)
-
-Run 7b's epoch-0 checkpoint decodes a plan that does not change when the CoC
-changes (05d: end-speed gap 0.00 m/s), yet its teacher-forced GT loss is low.
-Under teacher forcing the model sees four things at every trajectory position:
-the frames, the CoC text, the ego history + route, and the trajectory PREFIX.
-This scores the same windows with each of them degraded and reports the soft
-GT cross-entropy per position group, so the answer is a number per source
-rather than a guess.
-
-Conditions (teacher-forced, clean GT prefix unless stated):
-    full            frames + cached CoC + clean prefix
-    no_img          frames zeroed (exactly what image dropout serves in training)
-    swap_coc        CoC replaced by a WRONG maneuver (stop <-> accelerate)
-    no_img+swap     both
-    jitter16        prefix jittered at sigma 16 (run 7b's training maximum)
-    jitter64        prefix jittered at sigma 64
-    no_hist         the 48 ego-history slots hold the placeholder id (no ego motion)
-    no_hist+no_img  history blanked AND frames zeroed: prefix + CoC + route only
-    mask            prefix fully MASKED (context.PREFIX_MASK) - the no-prefix regime
-                    run 7c trains on 25% of windows; scene + CoC + route + history
-    mask+swap       masked prefix AND a wrong CoC - does the CoC matter when
-                    there is no prefix to lean on?
-    mask+no_img     masked prefix AND frames zeroed
-
-If `swap_coc` costs nothing at the first positions, the CoC is not read even
-where the prefix cannot yet reveal the plan. If `no_img` costs little, the
-scene is not read either, and the prefix + history are doing the work.
+"""Teacher-forced trajectory CE under degraded inputs (frames, CoC, history, prefix).
 
     python scripts/05e_traj_dependence.py --ckpt <dir> --n 40
 """
@@ -53,7 +26,7 @@ log = logging.getLogger("traj_dependence")
 
 STOP_COC = "Stop for the red traffic light since the signal is red"
 GO_COC = "Accelerate to proceed since the road ahead is clear"
-FIRST = 8      # first 4 waypoints (curv, acc interleaved)
+FIRST = 8      # first 4 waypoints
 
 
 def swap_coc(text: str) -> str:
@@ -96,7 +69,7 @@ def main() -> int:
     lo, hi = student.future_base, student.future_base + student.n_future_bins
     g = torch.Generator().manual_seed(0)
     n = min(a.n, len(ds))
-    acc = defaultdict(list)          # condition -> list of (128,) per-position CE
+    acc = defaultdict(list)
 
     def score(item, ctx, img_drop: bool) -> np.ndarray:
         it = {**item, "student": ctx, "img_drop": img_drop}
@@ -127,8 +100,7 @@ def main() -> int:
         acc["no_img+swap"].append(score(item, sw, True))
         acc["jitter16"].append(score(item, build(coc, jitter(gt_bins, 16.0, g)), False))
         acc["jitter64"].append(score(item, build(coc, jitter(gt_bins, 64.0, g)), False))
-        # Ego history: the same 48 slots, holding the placeholder the teacher
-        # emits BEFORE replace_pad_token fills them (D-029) - no motion at all.
+        # blank ego history
         hs, he = full["history_span"]
         nh = {**full, "input_ids": full["input_ids"].clone()}
         nh["input_ids"][hs:he] = student.special_ids["<|traj_history|>"]
@@ -146,7 +118,7 @@ def main() -> int:
     log.info("  %-14s %7s %9s %9s %8s %8s", "condition", "all", f"pos<{FIRST}", f"pos>={FIRST}",
              "curv", "accel")
     for k, rows in acc.items():
-        m = np.stack(rows)                     # (n, 128)
+        m = np.stack(rows)
         log.info("  %-14s %7.3f %9.3f %9.3f %8.3f %8.3f", k, m.mean(), m[:, :FIRST].mean(),
                  m[:, FIRST:].mean(), m[:, 0::2].mean(), m[:, 1::2].mean())
     return 0

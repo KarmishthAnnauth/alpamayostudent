@@ -1,10 +1,4 @@
-"""Phase 2: assign every Bench2Drive training window to a sampling bucket
-(src/distill/data/b2d_buckets.py) and write `<b2d_cache>/buckets_<split>.json`,
-which `train_stage2` reads when `stage2.buckets.enabled`. CPU, about a minute.
-
-    python scripts/01e_b2d_buckets.py                 # train split of paths.b2d_cache_root
-    python scripts/01e_b2d_buckets.py --split val     # a look at the val mix (never resampled)
-"""
+"""Assign Bench2Drive windows to sampling buckets and write buckets_<split>.json."""
 from __future__ import annotations
 import argparse
 import json

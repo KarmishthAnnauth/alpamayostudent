@@ -1,4 +1,4 @@
-"""Grounding filter + route hint (D-043): synthetic futures, no GPU, no model."""
+"""Grounding filter and route hint on synthetic futures."""
 import sys
 from pathlib import Path
 
@@ -10,8 +10,7 @@ from distill.data.grounding import contradicted, grounded_shards, route_hint  # 
 
 
 def future(v0: float, v1: float, bearing_deg: float = 0.0, n: int = 64) -> np.ndarray:
-    """A 6.4 s path at 10 Hz: speed ramps v0 -> v1, heading bends toward
-    `bearing_deg` over the last third. Same construction as test_gt_reward_offline."""
+    """6.4 s path at 10 Hz: speed v0 -> v1, heading bends to `bearing_deg`."""
     v = np.linspace(v0, v1, n)
     heads = np.zeros(n)
     k = n // 3

@@ -1,25 +1,4 @@
-"""Comprehensive free-running CoC evaluation: the student's own reasoning, scored.
-
-Fills the gap between the two things that already exist:
-
-  `val CoC NLL`            teacher-forced, token-level CE. Deterministic and a
-                           good SELECTOR, but it never lets the student speak and
-                           it moves on phrasing as much as on content.
-  `05a_inspect_coc.py`     free-running and real, but 8 windows and eyeball-only.
-
-This free-runs the student over hundreds of windows and scores each trace against
-the teacher's cached one on maneuver class, ego direction, named objects, and a
-safety-asymmetric false-clear rate (`distill/eval/coc_score.py` documents the
-grammar those rest on, and `parse_rate` reports how often it held).
-
-    python scripts/05b_eval_coc.py --ckpt <dir> --split val   --n 300
-    python scripts/05b_eval_coc.py --ckpt <dir> --split train --n 300
-
-Run BOTH splits: `split_challenging == split_val` (264 identical clips,
-eval_phase1.md §5) and selection already saw 60 val windows, so val alone is not
-a clean holdout. The train-val gap is the number to read - it measures the CoC
-overfitting directly, which matters because val CoC NLL peaks at epoch 1 of 12.
-"""
+"""Free-running CoC evaluation of the student against the teacher's cached traces."""
 from __future__ import annotations
 import argparse
 import json
@@ -42,8 +21,7 @@ log = logging.getLogger("eval_coc")
 
 
 def _decode(student, ids: list[int]) -> tuple[str, bool]:
-    """Student ids -> (text, terminated). Same contract as 05a's `_decode`:
-    drop the appended trajectory/special ids, then cut at the CoC terminator."""
+    """Student ids -> (text, terminated)."""
     lo = student.new_token_range[0]
     text = student.tokenizer.decode([i for i in ids if i < lo], skip_special_tokens=True)
     for s in ("<|cot_end|>", "</think>"):
@@ -64,33 +42,22 @@ def main() -> int:
     ap.add_argument("--ckpt", default=None)
     ap.add_argument("--split", default="val")
     ap.add_argument("--cameras", default=None,
-                    help="comma-separated camera subset, overriding data.cameras. "
-                         "Needed to score a checkpoint under the camera set it was "
-                         "TRAINED with: the label cache keys frames per camera at "
-                         "100% coverage (08_camera_ablation.py), so any subset is "
-                         "free, but scoring run-253 under run 5's 1-camera config "
-                         "would measure the train/test mismatch instead of the model.")
+                    help="comma-separated camera subset, overriding data.cameras")
     ap.add_argument("--n", type=int, default=300)
     ap.add_argument("--max-new-tokens", type=int, default=256)
     ap.add_argument("--temperature", type=float, default=None,
-                    help="decode temperature; default = teacher.gen_temperature (0.6, the "
-                         "teacher's own). `generate_coc_text` reads cfg.teacher.gen_*, so "
-                         "sweeping this shows whether the rare-maneuver mass is still in "
-                         "the student's distribution or gone from it.")
+                    help="default = teacher.gen_temperature")
     ap.add_argument("--top-p", type=float, default=None, help="default = teacher.gen_top_p")
     ap.add_argument("--adapters", default=None,
-                    help="adapter-only checkpoint dir (train_grpo_coc saves one per eval as "
-                         "step-NNNN/). Loaded on top of --ckpt, which must then be the run's "
-                         "init_ckpt. Lets any RL step be scored on full n after the fact.")
+                    help="GRPO step-NNNN/ adapters, loaded on top of --ckpt (the phase 1 checkpoint)")
     ap.add_argument("--route-hint", action="store_true",
-                    help="give the student the GT-derived route hint, as the RL run did")
+                    help="give the student the route hint, as in training")
     ap.add_argument("--dump", default=None, help="JSONL of every (student, teacher) pair")
     ap.add_argument("--out", default=None, help="JSON summary")
     a = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     cfg = load_config(a.config)
-    # Same override point as 08_camera_ablation.py: the context builder reads
-    # cfg.data.raw["cameras"] at call time, so this must land before the student.
+    # Must be set before the student is built.
     if a.cameras:
         cfg.raw["data"]["cameras"] = [c.strip() for c in a.cameras.split(",") if c.strip()]
     log.info("cameras: %s", list(cfg.data.raw["cameras"]))
@@ -110,7 +77,7 @@ def main() -> int:
     log.info("checkpoint: %s (epoch=%s select_on=%s coc_nll=%s)", ckpt, meta.get("epoch"),
              meta.get("select_on"), meta.get("val_coc_nll"))
     if a.adapters:
-        student.param_groups_stage1()                  # inject, then load the adapters
+        student.param_groups_stage1()                  # inject adapters first
         ameta = checkpoint.load_adapters(student, a.adapters)
         log.info("adapters: %s (step=%s)", a.adapters, ameta.get("step"))
     student.eval()

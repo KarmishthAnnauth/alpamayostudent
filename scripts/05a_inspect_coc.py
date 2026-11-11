@@ -1,17 +1,8 @@
 """Free-run the stage-1 student's chain-of-causation on a few windows and print it.
 
-The epoch gate teacher-forces the CoC (`eval/coarse_minade.py`), so nothing so
-far shows what the student would actually reason. This loads a merged stage-1
-checkpoint, builds a generation prompt that stops at `<|cot_start|>`, and lets
-the student decode the CoC itself — printed next to the teacher's cached CoC for
-the same window.
-
-    python scripts/05a_inspect_coc.py                    # 8 windows, runs/stage1/best
+    python scripts/05a_inspect_coc.py
     python scripts/05a_inspect_coc.py --n 20 --split val
     python scripts/05a_inspect_coc.py --ckpt /data/vla/alpamayo2edge/runs/stage1/best
-
-Not a metric — an eyeball. minADE_6 is blind to the CoC (eval_phase1.md §5), so
-"did the text collapse / loop / stay on-topic" is a question only this answers.
 """
 from __future__ import annotations
 import argparse
@@ -32,9 +23,7 @@ log = logging.getLogger("inspect_coc")
 
 
 def _decode(student, ids: list[int]) -> tuple[str, bool, int]:
-    """Student ids -> (coc_text, terminated, n_extra). Drops appended
-    trajectory/special ids (not in the tokenizer), then cuts at the CoC
-    terminator so over-generation past `<|cot_end|>` / `</think>` is not shown."""
+    """Student ids -> (coc_text, terminated, n_extra)."""
     lo = student.new_token_range[0]
     kept = [i for i in ids if i < lo]
     text = student.tokenizer.decode(kept, skip_special_tokens=True)
@@ -62,9 +51,6 @@ def main() -> int:
     traj_spec = torch.load(Path(cfg.paths.cache_root) / "traj_tokenizer_spec.pt",
                            weights_only=False)
     student.extend_trajectory_vocab(traj_spec)
-    # The merged checkpoint carries the SigLIP2 vision tower (it was materialized
-    # before `checkpoint.save` ran in training). `_ensure_vision_tower` is lazy,
-    # so attach it now or `load_state_dict` sees 443 unexpected `visual.*` keys.
     student.lm._ensure_vision_tower()
 
     ckpt = Path(a.ckpt or (Path(cfg.paths.runs_root) / "stage1" / "best"))

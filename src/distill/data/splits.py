@@ -1,22 +1,4 @@
-"""Train / val / challenging / geographic-holdout splits over a curated set.
-
-Nothing wrote `split_*.json` until now, and three consumers read it:
-`train_stage1`'s epoch gate (`eval/coarse_minade.py`), `scripts/05_eval.py` and
-`scripts/07_measure_gap.py`. The gate runs at the END of epoch 1, so the missing
-file surfaced hours into a run rather than before it.
-
-**Membership is a property of the clip id, not of its position in a list.**
-`curation.curate` is deterministic per `(seed, clip_id)` so the increments nest
-(`curated_500 subset curated_2000 subset curated_5000`); splitting by a per-clip
-hash keeps that property downstream — `val_500 subset val_2000` — which is what
-makes the data-scaling curve apples-to-apples. Splitting by index would reshuffle
-every clip's assignment each time the increment grows.
-
-The geographic holdout (JPN/ZAF) is written for completeness but is NOT labeled:
-`curation.curate` drops those clips before the teacher ever sees them. Evaluating
-on it needs a separate input-only caching pass — teacher targets are not required
-for a minADE number, only student frames and GT.
-"""
+"""Deterministic per-clip train / val / challenging splits over a curated set."""
 from __future__ import annotations
 import json
 import logging
@@ -25,14 +7,9 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-#: Strata that count as long-tail. `curation.stratum_of` returns "default" for
-#: everything else, and averaged minADE over easy driving saturates early at this
-#: data scale (eval/open_loop.py's own docstring) — hence a hard-sample gate.
 LONG_TAIL = ("construction", "pedestrian", "intersection", "adverse_weather",
              "night", "cut_in")
 
-#: Below this the challenging split is too small to early-stop on, and the gate
-#: falls back to the full val split rather than reading noise.
 MIN_CHALLENGING = 5
 
 
@@ -43,12 +20,7 @@ def in_val(clip_id: str, val_fraction: float, seed: int = 0) -> bool:
 
 def make_splits(cfg, clip_ids: list[str], stratum_fn=None,
                 seed: int = 0) -> dict[str, list[str]]:
-    """`{"train": [...], "val": [...], "challenging": [...]}` over `clip_ids`.
-
-    `stratum_fn(clip_id) -> str` is injected so this is testable without the
-    dataset index; the default reads `data_collection.parquet` through
-    `curation.stratum_of`, exactly as curation itself does.
-    """
+    """Split `clip_ids` into train, val and challenging (long-tail val)."""
     if stratum_fn is None:
         stratum_fn = _default_stratum_fn(cfg)
 

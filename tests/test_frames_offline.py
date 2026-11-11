@@ -1,9 +1,4 @@
-"""The student-input cache must survive a JPEG round trip with channels intact.
-
-A silent RGB/BGR swap here trains the student on blue cars and is invisible
-until someone looks at a decoded frame — long after a labeling run and a
-training run. `frames_student` is RGB; OpenCV is BGR; both directions flip.
-"""
+"""Student-input frame cache survives a JPEG round trip with RGB channels intact."""
 import sys
 from pathlib import Path
 
@@ -57,8 +52,7 @@ def test_round_trip_preserves_channel_order(tmp_path):
 
 
 def test_frames_stay_in_capture_order(tmp_path):
-    """Frame 0 must decode as frame 0 — keys are strings, so '10' must not sort
-    before '2' once we go past 9 frames."""
+    """Frames decode in capture order past 9 frames."""
     n = 12
     arr = np.zeros((n, 8, 8, 3), dtype=np.uint8)
     for i in range(n):

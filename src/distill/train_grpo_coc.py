@@ -1,44 +1,4 @@
-"""Phase 1.5: GRPO on the AR tower's chain-of-causation (D-037).
-
-Why RL and not a better CE. `text_kl` is hard-label CE on ONE sampled teacher
-trace per window, and 05c/05b measured what that produces: where the teacher
-commits (nudge / adapt / lane change) the student holds ~0.1-0.25 on the
-teacher's verb and the rest on "keep", so at T=0.6 it never says it - a
-conditional that is under-sharpened, not mode-deficient (the mass reappears at
-T=1.0, at the cost of accuracy). CE learns the expectation of a noisy target and
-cannot sharpen it; group-relative reward can. It is also how the teacher got its
-own CoC: Alpamayo 1.5 was RL post-trained with a reasoning reward on the
-chain-of-causation (model card; recipes/alpamayo1_x_rl, GRPO, n_generation 12).
-
-One process, one GPU, no vLLM: the student is 2B and a CoC is ~14 tokens.
-
-  policy     run-314/best (merged) + FRESH LoRA adapters (zero-init B), so the
-             policy starts exactly at the SFT checkpoint
-  reference  the same weights with the adapters scaled to 0 - no second model
-  rollouts   `generate_coc_text`, G samples per prompt at the teacher's own
-             T=0.6 / top_p 0.98 (the setting the student is judged at)
-  reward     `eval.coc_score` against the cached teacher trace: maneuver match,
-             ego direction, object recall, a false-clear penalty, and a hard
-             penalty for not terminating (rule-based, deterministic, free)
-  advantage  group-normalised; zero-variance groups are skipped (the recipe's
-             documented "GRPO group collapse")
-  loss       per-token policy gradient + beta * KL(policy || reference)
-             (k3 estimator) + ce_aux * the existing teacher-forced CE, as an
-             anchor against reward-hacking the rule grader
-
-Everything comes from the cache (student inputs + `coc_text`); no streaming.
-
-Run 4 (`reward.mode: perspan`, D-040). The student's plan does not depend on
-its CoC (forcing "turn left" vs "turn right" moves the decoded heading 2-6
-deg), so run 3's one ADE-based advantage on both spans trained the trajectory
-tokens and fed the CoC noise. Now each joint rollout gets TWO rewards and two
-group-normalised advantages: an ADE reward on the trajectory span, the
-GT-grounded text rules on the CoC span, and a self-consistency term (the CoC's
-stated maneuver scored against the kinematics of the student's OWN decoded
-plan) on both - the only term that builds the chain instead of assuming it.
-The CoC is sampled at `coc_temperature` in rollouts so the sharp 4-camera
-student's groups hold different reasonings to choose between.
-"""
+"""GRPO on the student's chain-of-causation (and optionally trajectory) with LoRA adapters."""
 from __future__ import annotations
 import contextlib
 import functools
@@ -66,10 +26,8 @@ log = logging.getLogger(__name__)
 STOPS = ("<|cot_end|>", "</think>")
 
 
-# ------------------------------------------------------------ pure parts ----
-
 def decode_coc(tokenizer, ids: list[int], vocab_lo: int) -> tuple[str, bool]:
-    """Student ids -> (text, terminated). Same contract as 05a/05b `_decode`."""
+    """Student ids -> (text, terminated)."""
     text = tokenizer.decode([i for i in ids if i < vocab_lo], skip_special_tokens=True)
     for s in STOPS:
         if s in text:
@@ -79,12 +37,7 @@ def decode_coc(tokenizer, ids: list[int], vocab_lo: int) -> tuple[str, bool]:
 
 def coc_reward(student_text: str, teacher_text: str, terminated: bool,
                n_tokens: int, w) -> tuple[float, dict]:
-    """Scalar reward for one rollout, plus the fields it came from.
-
-    `w` carries the weights (cfg.stage1_rl.reward). Not terminating, or running
-    past `max_tokens`, is a hard failure regardless of content: the CoC's KV is
-    what stage 2 attends, and an unterminated one is unusable.
-    """
+    """Scalar reward for one rollout, plus the fields it came from."""
     if not terminated or n_tokens > int(w.max_tokens):
         return float(w.fail), {"fail": True}
     s = coc_score.score_pair(student_text, teacher_text)
@@ -115,12 +68,7 @@ def group_advantages(rewards: list[float], eps: float = 1e-4) -> list[float] | N
 
 @contextlib.contextmanager
 def adapters_off(root: torch.nn.Module):
-    """Reference policy = the same weights with every LoRA branch scaled to 0.
-
-    `LoraInjectedLinear.forward` is `base(x) + (alpha / r) * B(A(x))`
-    (cosmos_framework/utils/generator/lora.py), so zeroing `_lora_alpha` for the
-    duration of a forward gives the merged SFT checkpoint's logits exactly.
-    """
+    """Reference policy: same weights with every LoRA branch scaled to 0."""
     mods = [m for _, m in lora.lora_modules(root)]     # yields (path, module)
     saved = [m._lora_alpha for m in mods]
     for m in mods:
@@ -132,16 +80,13 @@ def adapters_off(root: torch.nn.Module):
             m._lora_alpha = a
 
 
-# ------------------------------------------------------------ the loop ----
-
 def _coc_logp(student, batch) -> tuple[torch.Tensor, torch.Tensor]:
     """Per-token log-probs of the CoC positions, (B, n) with a validity mask."""
     return _span_logps(student, batch)["coc"]
 
 
 def _span_logps(student, batch) -> dict:
-    """One forward; per-token log-probs for the CoC span and, when the batch
-    carries trajectory positions (joint rollouts, D-039), the trajectory span."""
+    """Per-token log-probs for the CoC span and, if present, the trajectory span."""
     out = student.ar_forward(batch, capture_layers=())
     res = {}
     for key, pos in (("coc", "coc_pos"), ("traj", "traj_pos")):
@@ -154,10 +99,7 @@ def _span_logps(student, batch) -> dict:
 
 
 def _rollout_traj(student, item, gen_ctx, G, pad_id, max_new, coc_temperature=None):
-    """Joint CoC + trajectory rollouts for one prompt; returns per-sample
-    (text, terminated, n_coc_tokens, bins|None, ade|None, plan_xyz|None).
-    `plan_xyz` is the decoded (H, 3) ego-frame plan the ADE was computed on;
-    the per-span reward scores the CoC against it (self-consistency)."""
+    """Joint CoC + trajectory rollouts for one prompt."""
     student.eval()
     with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
         gb = move_batch(collate_student([{"student": gen_ctx}] * G, pad_id))
@@ -184,8 +126,7 @@ def _rollout_traj(student, item, gen_ctx, G, pad_id, max_new, coc_temperature=No
 
 
 def _gen_ctx(ds, i, item, route: bool):
-    """Generation prompt for window i, with the GT-derived route hint when
-    `route` is on. The dataset's own context has no route; rebuild it."""
+    """Generation prompt for window i, optionally with the GT-derived route hint."""
     if not route:
         return item["student"], None
     path = ds.shards[i]
@@ -201,10 +142,7 @@ def _rate(xs):
 
 def _val_eval(cfg, student, ds_val, n: int, pad_id: int, max_new: int, route: bool,
               traj: bool = False) -> dict:
-    """Free-running check on val. Teacher-relative fields (maneuver acc vs the
-    cached trace) AND teacher-free ones (`gt_reward.gt_metrics`): consistency
-    with the driver's speed/path, GT false-clear, ungrounded hazard mentions,
-    direction vs the direction taken. `gt_score` drives selection."""
+    """Free-running val eval with teacher-relative and GT-grounded metrics."""
     student.eval()
     rows = []
     vocab_lo = student.new_token_range[0]
@@ -247,33 +185,30 @@ def _val_eval(cfg, student, ds_val, n: int, pad_id: int, max_new: int, route: bo
     }
 
 
-def main(cfg_path: str, smoke: bool = False, run_name: str | None = None) -> None:
+def main(cfg_path: str, run_name: str | None = None, init_ckpt: str | None = None) -> None:
     cfg = load_config(cfg_path)
     rl = cfg.stage1_rl
-    if run_name:            # a smoke gets its own dir, so its rows never land in the real curve
+    if run_name:
         cfg.raw["stage1_rl"]["run_name"] = run_name
+    if init_ckpt:
+        cfg.raw["stage1_rl"]["init_ckpt"] = init_ckpt
     G = int(rl.group_size)
     B = int(rl.prompts_per_step)
     steps = int(rl.steps)
     eval_n = int(rl.eval_windows)
-    if smoke:
-        G, B, steps, eval_n = 4, 2, 2, 8
-        log.info("SMOKE: G=%d prompts=%d steps=%d eval=%d", G, B, steps, eval_n)
     torch.backends.cuda.matmul.allow_tf32 = True
     random.seed(int(rl.get("seed", 0)))
-    # RL-only camera set (D-038): the reward is valid against what a driver can
-    # see, and the 1-camera teacher reproduced its own committed labels 48% of
-    # the time vs 72% on 4. The context builder reads data.cameras at call time.
+    # RL-only camera set.
     if rl.get("cameras"):
         cfg.raw["data"]["cameras"] = list(rl.cameras)
     log.info("cameras: %s", list(cfg.data.raw["cameras"]))
     route = bool(rl.get("route_hint", False))
     mode = str(rl.reward.get("mode", "teacher"))
-    coc_temp = rl.get("coc_temperature")           # rollout-only; val decodes at `temperature`
+    coc_temp = rl.get("coc_temperature")           # rollout-only
     coc_temp = float(coc_temp) if coc_temp is not None else None
     log.info("reward mode: %s   route hint: %s   coc_temperature: %s", mode, route, coc_temp)
 
-    # --- policy: merged SFT checkpoint + fresh adapters ------------------
+    # Policy: merged SFT checkpoint + fresh adapters.
     student = EdgeStudent(cfg).cuda()
     student.extend_trajectory_vocab(torch.load(
         Path(cfg.paths.cache_root) / "traj_tokenizer_spec.pt", weights_only=False))
@@ -284,14 +219,13 @@ def main(cfg_path: str, smoke: bool = False, run_name: str | None = None) -> Non
     groups = student.param_groups_stage1()          # injects LoRA, freezes the rest
     lora_params = groups[0]["params"]
     log.info("LoRA: %s", student.lora_stats)
-    for p in groups[1]["params"]:                   # new-token rows: SFT-trained, hold fixed
+    for p in groups[1]["params"]:                   # freeze new-token rows
         p.requires_grad_(False)
     opt = torch.optim.AdamW(lora_params, lr=float(rl.lr), weight_decay=0.0, betas=(0.9, 0.99))
     student.train()
     pad_id = student.tokenizer.pad_token_id
     vocab_lo = student.new_token_range[0]
 
-    # --- data: generation prompts; the scoring contexts are rebuilt per sample
     ds = Stage1Dataset(cfg, student.context_builder(),
                        clip_ids=load_split(cfg, "train"), cot_generation=True)
     ds_val = Stage1Dataset(cfg, student.context_builder(),
@@ -299,12 +233,7 @@ def main(cfg_path: str, smoke: bool = False, run_name: str | None = None) -> Non
     order = list(range(len(ds)))
     random.shuffle(order)
     log.info("train prompts: %d   val eval windows: %d", len(ds), eval_n)
-    # Prompt selection. Job 315's first steps at uniform prompts and G=8 skipped
-    # 69-81% of groups: on an easy FOLLOW scene all G rollouts agree and there is
-    # no advantage. Drawing prompts by the teacher's maneuver class (the run-6
-    # sampler weights) puts variance-rich scenes in front of the policy more
-    # often. Unlike SFT this does not bias what is learned - advantages are
-    # relative within a group - it only decides which groups exist at all.
+    # Optionally weight prompts by teacher maneuver class.
     prompt_w = None
     p_alpha = float(rl.get("prompt_alpha", 0.0))
     if p_alpha > 0:
@@ -312,7 +241,6 @@ def main(cfg_path: str, smoke: bool = False, run_name: str | None = None) -> Non
         prompt_w, mix = maneuver_weights(ds.shards, p_alpha)
         log_mix(mix, p_alpha)
 
-    # decode at the setting the student is judged at
     cfg.raw["teacher"]["gen_temperature"] = float(rl.temperature)
     cfg.raw["teacher"]["gen_top_p"] = float(rl.top_p)
     max_new = int(rl.max_new_tokens)
@@ -320,7 +248,7 @@ def main(cfg_path: str, smoke: bool = False, run_name: str | None = None) -> Non
 
     run_dir = Path(cfg.paths.runs_root) / "stage1_rl" / (rl.get("run_name") or "run")
     run_dir.mkdir(parents=True, exist_ok=True)
-    best_acc, cursor = float("-inf"), 0   # any first eval is a best (neg_ade is < -1)
+    best_acc, cursor = float("-inf"), 0
     hist = open(run_dir / "steps.jsonl", "a")
 
     perspan = (mode == "perspan")
@@ -350,9 +278,9 @@ def main(cfg_path: str, smoke: bool = False, run_name: str | None = None) -> Non
             hint = gt_reward.route_hint(k) if route else None
             gen_ctx = ds.ctx.build(window, coc_text=None, nav_text=hint) if route else item["student"]
 
-            # ---- rollouts: G samples of the same prompt ----
+            # Rollouts: G samples per prompt.
             texts, rewards, terms, bins_list = [], [], [], []
-            rew_coc = []                                   # perspan: the CoC span's own reward
+            rew_coc = []
             if traj_mode:
                 samples = _rollout_traj(student, item, gen_ctx, G, pad_id, max_new, coc_temp)
             else:
@@ -384,18 +312,13 @@ def main(cfg_path: str, smoke: bool = False, run_name: str | None = None) -> Non
                 stats["fail"] += int(bool(s.get("fail"))) if isinstance(s, dict) else 0
                 stats["false_clear"] += int(bool(s.get("false_clear"))) if isinstance(s, dict) else 0
                 stats["man_match"] += int(bool(s.get("maneuver_match"))) if isinstance(s, dict) else 0
-                for comp in ("kin", "dir", "hazard", "teacher", "self"):  # gt / perspan components
+                for comp in ("kin", "dir", "hazard", "teacher", "self"):
                     if isinstance(s, dict) and comp in s:
                         stats[comp] += float(s[comp])
             rew_all += rewards
             rew_coc_all += rew_coc
             stats["groups"] += 1
-            # Advantages. One list per span: in perspan mode the trajectory
-            # span's comes from r_traj and the CoC span's from r_coc, each
-            # group-normalised on its own with its own zero-variance skip (a
-            # flat span gets zero advantage; the group is dropped only when
-            # both are flat). Every other mode applies the one advantage to
-            # whatever spans the rollout has.
+            # Per-span group-normalised advantages.
             adv = group_advantages(rewards)
             adv_c = group_advantages(rew_coc) if perspan else adv
             if perspan:
@@ -403,33 +326,21 @@ def main(cfg_path: str, smoke: bool = False, run_name: str | None = None) -> Non
                 stats["flat_coc"] += int(adv_c is None)
             if adv is None and adv_c is None:
                 stats["skipped"] += 1
-                if not smoke:
-                    continue
-                # Smoke must exercise the backward path even when every group is
-                # flat (easy prompts at G=4 usually are): zero advantage leaves
-                # only the KL + CE terms, which is enough to run it end to end.
-                adv = adv_c = [0.0] * len(rewards)
+                continue
             adv = adv if adv is not None else [0.0] * len(rewards)
             adv_c = adv_c if adv_c is not None else [0.0] * len(rewards)
 
-            # ---- policy + reference log-probs on the sampled CoCs ----
+            # Policy and reference log-probs.
             keep = [(t, a, ac, bn) for t, a, ac, bn in zip(texts, adv, adv_c, bins_list) if t]
             if not keep:                                    # empty text: no tokens
                 stats["skipped"] += 1
                 continue
-            # Scoring layout = the training layout: CoC teacher-forced from the
-            # sample; in traj mode the sampled bins follow it (a failed sample
-            # has no bins and is scored on its CoC alone).
             ctxs = [{"student": (ds.ctx.build(window, coc_text=t, traj_bins=bn.tolist(), nav_text=hint)
                                  if bn is not None else
                                  ds.ctx.build(window, coc_text=t, for_generation=True, nav_text=hint))}
                     for t, _, _, bn in keep]
             advs = {"traj": [a for _, a, _, _ in keep], "coc": [ac for _, _, ac, _ in keep]}
-            # Score in chunks with gradient accumulation: the full-vocab logits
-            # over every position of G ~1.7k-token rows do not fit next to the
-            # activations for backward at G=16 (or at G=4 on the Ada's cap).
-            # Each chunk's per-span mean is weighted by its share of the rows,
-            # so the sum equals the un-chunked per-span mean.
+            # Score in chunks to bound memory; weighted so the sum matches the full mean.
             chunk = int(rl.get("score_chunk", 8))
             for c0 in range(0, len(ctxs), chunk):
                 cctx = ctxs[c0:c0 + chunk]
@@ -452,14 +363,14 @@ def main(cfg_path: str, smoke: bool = False, run_name: str | None = None) -> Non
                     d = ref_logp - logp
                     kl = torch.exp(d) - d - 1.0                       # k3, >= 0
                     per_tok = -A * ratio + beta * kl
-                    # Per-SPAN mean: 128 trajectory tokens must not drown 14 CoC tokens.
+                    # Per-span mean.
                     pg = pg + wspan * share * (per_tok * okf).sum() / okf.sum().clamp_min(1) / B
                     kl_all.append(float(((kl * okf).sum() / okf.sum().clamp_min(1)).detach()))
                     n_tok += int(okf.sum())
                 pg.backward()
                 del pol, ref, sb
 
-            # ---- CE anchor on the teacher's trace ----
+            # CE anchor on the teacher's trace.
             if ce_aux > 0 and teacher:
                 tb = move_batch(collate_student(
                     [{"student": ds.ctx.build(window, coc_text=teacher, for_generation=True,
@@ -521,28 +432,23 @@ def main(cfg_path: str, smoke: bool = False, run_name: str | None = None) -> Non
             hist.write(json.dumps({"step": step, "val": v}) + "\n"); hist.flush()
             sel_key = str(rl.get("select_on", "gt_score"))
             sel = float(v[sel_key] if v.get(sel_key) is not None else -1e9)
-            if not smoke:
-                # Every eval keeps its adapters (~75 MB): nothing is lost to a
-                # noisy selector, and any step can be scored on full n later.
-                checkpoint.save_adapters(student, run_dir / f"step-{step:04d}", stage="stage1_rl",
-                                         step=step, init_ckpt=str(init), val=v)
-            if not smoke and sel > best_acc:
+            # Keep adapters at every eval.
+            checkpoint.save_adapters(student, run_dir / f"step-{step:04d}", stage="stage1_rl",
+                                     step=step, init_ckpt=str(init), val=v)
+            if sel > best_acc:
                 best_acc = sel
                 checkpoint.save(student, run_dir / "best", stage="stage1_rl", step=step,
                                 select_on=sel_key, val_select=float(best_acc),
                                 val_maneuver_acc=float(v["maneuver_acc"] or 0.0), init_ckpt=str(init))
                 log.info("  <- new best (val %s %.3f), saved", sel_key, best_acc)
-    if smoke:
-        log.info("SMOKE OK  peak GPU %.1f GiB", torch.cuda.max_memory_allocated() / 2**30)
 
 
 if __name__ == "__main__":
     import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="configs/default.yaml")
-    ap.add_argument("--smoke", action="store_true")
-    ap.add_argument("--run-name", default=None,
-                    help="override stage1_rl.run_name (give a smoke its own steps.jsonl)")
+    ap.add_argument("--run-name", default=None, help="override stage1_rl.run_name")
+    ap.add_argument("--init-ckpt", default=None, help="phase 1 checkpoint (default: stage1_rl.init_ckpt)")
     a = ap.parse_args()
     logging.basicConfig(level=logging.INFO)
-    main(a.config, smoke=a.smoke, run_name=a.run_name)
+    main(a.config, run_name=a.run_name, init_ckpt=a.init_ckpt)

@@ -1,24 +1,4 @@
-"""The fetch pool must overlap streaming with the teacher without reordering
-the cache or breaking free resume.
-
-Labeling is two bottlenecks in series: `load_window` is network-bound (measured
-7-17 s per camera, four cameras) and `label_window` is GPU-bound. Run serially
-the GPU idles ~80% of the time — a live 500-clip run measured 30 s/window at 20%
-utilisation. Fetching several windows at once is the whole speedup, and NVIDIA's
-`load_physical_aiavdataset` fetches its cameras serially inside one call, so the
-concurrency has to be at the window level.
-
-Three things can go wrong, none of which shows up as an exception:
-
-* **Resume regresses.** If work is submitted before the filesystem is consulted,
-  the pool cheerfully streams every window the run is about to skip — the exact
-  cost `plan_work` exists to avoid, and worse with a pool than without.
-* **Order drifts.** Shards are keyed (clip_id, w_idx) so the cache survives it,
-  but out-of-order consumption unbounds memory: decoded windows pile up waiting
-  for a slow head instead of being capped at `depth`.
-* **No actual concurrency.** A pool that silently serialises still passes every
-  correctness test and just runs at the old speed.
-"""
+"""The fetch pool must overlap streaming with the teacher without reordering or breaking resume."""
 import sys
 import threading
 import time
@@ -111,25 +91,21 @@ def harness(tmp_path, monkeypatch):
 
 
 def test_pool_actually_fetches_concurrently(harness):
-    """A pool that silently serialises passes every correctness test below and
-    just runs at the old speed. This is the one that catches that."""
+    """Catches a pool that silently serialises."""
     st = harness(workers=4)
     assert st.peak >= 2, f"no concurrency: peak in-flight was {st.peak}"
     assert len(st.labeled) == 12
 
 
 def test_single_worker_is_strictly_serial(harness):
-    """workers<=1 takes the plain path — the one to debug on, since a traceback
-    from a pool thread loses the enclosing context."""
+    """workers<=1 takes the plain serial path."""
     st = harness(workers=1)
     assert st.peak == 1
     assert len(st.labeled) == 12
 
 
 def test_consumption_order_matches_the_curated_list(harness):
-    """Out-of-order completion is fine for the cache but unbounds memory, since
-    decoded windows would pile up behind a slow head instead of capping at
-    `depth`."""
+    """Windows are consumed in curated order, bounding memory to `depth`."""
     st = harness(workers=4)
     assert st.labeled == [c for c in CLIPS for _ in range(2)]
 
@@ -142,9 +118,7 @@ def test_prefetch_overlaps_fetch_with_teacher(harness):
 
 
 def test_resume_still_streams_nothing(harness):
-    """THE REGRESSION, now with a pool in front of it. Submitting before
-    consulting the filesystem would stream every window the run is about to
-    skip — the cost `plan_work` exists to avoid, and worse with a pool."""
+    """Existing shards are skipped before anything is submitted to the pool."""
     cached = [(c, w, k) for c in CLIPS for w in (0, 1) for k in ("shard", "input")]
     st = harness(workers=4, preexisting=cached)
     assert st.loaded == []
@@ -174,11 +148,7 @@ def test_plan_work_touches_no_network(tmp_path, monkeypatch):
 
 
 def test_shard_write_is_atomic(tmp_path):
-    """`sbatch_label.sh` claimed atomic writes; np.savez_compressed wrote straight
-    to the destination. Resume keys off existence, so a shard truncated by a kill
-    mid-write is worse than a missing one - skipped forever, surfacing later as a
-    loader error long after the run that made it. A 3-day 5000-clip run has ample
-    opportunity to be interrupted."""
+    """Shards are written atomically."""
     import numpy as np
 
     labeler.atomic_savez(tmp_path / "00.npz", True, a=np.arange(5))
@@ -191,8 +161,7 @@ def test_shard_write_is_atomic(tmp_path):
 
 
 def _failing_harness(tmp_path, monkeypatch, fail_for, fail_teacher=()):
-    """Like `harness`, but `load_window` raises for clips in `fail_for` and
-    `label_window` raises for clips in `fail_teacher`."""
+    """Like `harness`, but fetch/teacher raise for the given clips."""
     st = types.SimpleNamespace(loaded=[], labeled=[])
 
     def touch(p, text="x"):
@@ -223,10 +192,7 @@ def _failing_harness(tmp_path, monkeypatch, fail_for, fail_teacher=()):
 
 
 def test_a_failed_fetch_does_not_kill_the_run(tmp_path, monkeypatch):
-    """THE UNATTENDED-RUN REGRESSION. huggingface_hub retries 5x; a fetch that
-    fails past that used to propagate out of fut.result() and end the whole pass.
-    Over a 27-hour run on a network we have watched retry, that is the difference
-    between a finished cache and a stack trace from 2am."""
+    """A failed fetch skips its windows instead of ending the run."""
     st = _failing_harness(tmp_path, monkeypatch, fail_for={"clip02"})
     labeler.run_labeling(_cfg(tmp_path, 4), list(CLIPS))
     assert set(st.labeled) == set(CLIPS) - {"clip02"}
@@ -253,9 +219,7 @@ def test_a_failed_teacher_pass_is_also_survived(tmp_path, monkeypatch):
 
 
 def test_systemic_failure_trips_the_circuit_breaker(tmp_path, monkeypatch):
-    """Scattered failures are the network; a solid run of them is an expired
-    token or a full disk, and grinding through thousands of windows writing
-    nothing is worse than stopping."""
+    """A solid run of failures stops the run."""
     st = _failing_harness(tmp_path, monkeypatch, fail_for=set(CLIPS))
     cfg = _cfg(tmp_path, 4)
     cfg["teacher"]["max_consecutive_failures"] = 3

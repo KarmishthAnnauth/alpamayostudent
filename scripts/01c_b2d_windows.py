@@ -1,28 +1,8 @@
 """Build the Bench2Drive window cache for phase 2 (flow-head training).
 
-    python scripts/01c_b2d_windows.py --limit 5            # 5 clips, timing, summary
-    python scripts/01c_b2d_windows.py --workers 8          # everything with a .done marker
-    python scripts/01c_b2d_windows.py --summary-only       # re-print the table + splits
-
-Walks `/bulk/datasets/bench2drive/extracted/*/` (ONLY dirs carrying `.done` -
-the extraction job deletes tarballs as it verifies them and wipes partial dirs),
-turns every clip into windows (`distill.data.bench2drive`), and writes them in
-the labeler's on-disk layout:
-
-    <out>/<clip>/{w:02d}.npz          targets: gt_traj (64x2 action space),
-                                       gt_future_xyz/rot, should_brake, expert
-                                       controls, route hint + raw command, scenario,
-                                       town, route, weather, anchor frame, and
-                                       gt_traj_token_ids when the tokenizer spec
-                                       is available
-    <out>/<clip>/{w:02d}_input.npz    student frames (JPEG) + ego history
-    <out>/<clip>/windows.json         one small row per window (summaries)
-    <out>/splits.json                 train/val by town+route, stratified by scenario
-    <out>/manifest.json, split_train.json, split_val.json   labeler-format lists
-
-Resumable: a window whose two files exist is skipped. CPU only. Wall time per
-clip is printed (JPEG decode + resize dominates: 4 frames x 3 raw cameras per
-window plus the tele crop).
+    python scripts/01c_b2d_windows.py --limit 5
+    python scripts/01c_b2d_windows.py --workers 8
+    python scripts/01c_b2d_windows.py --summary-only
 """
 from __future__ import annotations
 
@@ -38,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 log = logging.getLogger("b2d_windows")
 
-_W: dict = {}   # per-worker state (action space, tokenizer, params)
+_W: dict = {}
 
 
 def _init_worker(params_dict: dict, spec_path: str | None, teacher_repo: str | None,
@@ -51,7 +31,7 @@ def _init_worker(params_dict: dict, spec_path: str | None, teacher_repo: str | N
                                         stats=action_stats)
     _W["tokenizer_fn"] = None
     if spec_path:
-        spec = torch.load(spec_path, weights_only=False)   # pickled callables, D-032
+        spec = torch.load(spec_path, weights_only=False)
         _W["tokenizer_fn"] = spec["tokenizer_fn"]
 
 
@@ -85,7 +65,7 @@ def _build_clip(args: tuple[str, str]) -> dict:
         tmp.replace(wj)
         rec["n_frames"] = anno.n
         rec["total_windows"] = len(rows)
-    except Exception as e:      # one bad clip must not end an unattended run
+    except Exception as e:
         rec["error"] = f"{type(e).__name__}: {e}"
     rec["seconds"] = time.perf_counter() - t_start
     return rec
@@ -196,7 +176,6 @@ def main():
               f"mean {sum(r['seconds'] for r in ok) / max(len(ok), 1):.2f} s "
               f"({built / max(sum(r['seconds'] for r in ok), 1e-9):.1f} windows/s per worker)")
 
-    # Splits over every clip with shards in the cache (built now or earlier).
     have = sorted(p.name for p in out_root.iterdir()
                   if p.is_dir() and (p / "windows.json").exists())
     sp = b2d.write_splits(out_root, have, a.val_fraction, a.seed) if have else None

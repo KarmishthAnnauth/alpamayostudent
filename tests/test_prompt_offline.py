@@ -1,11 +1,4 @@
-"""The student context must mirror the teacher's byte-for-byte where it can.
-
-These tests pin the format against the two NVIDIA sources it was copied from
-(`alpamayo1.5/helper.py::create_message` and `alpamayo-recipes`'
-`chat_template/components.py`). If someone edits a string in prompt.py, the
-expected literal here has to be edited too — which is the point: the format is
-not ours to drift.
-"""
+"""The student context must mirror the teacher's prompt format."""
 import sys
 from pathlib import Path
 
@@ -66,8 +59,7 @@ def test_training_target_is_cot_then_trajectory():
 # --- assemble ---------------------------------------------------------------
 
 def _stub():
-    """A tokenizer stand-in: one id per character, specials and bins in their
-    own high ranges so spans are unambiguous."""
+    """Tokenizer stand-in with one id per character and separate special/bin ranges."""
     return dict(
         encode=lambda s: [ord(c) % 50 for c in s],
         special_id=lambda t: 900 + prompt.SPECIAL_TOKENS.index(t),
@@ -108,9 +100,7 @@ def test_assemble_generation_mode_has_no_trajectory_span():
 
 
 def test_assemble_marks_the_coc_terminator_span():
-    """`struct_span` must cover exactly the `<|cot_end|><|traj_future_start|>`
-    tokens — run 1 left these unsupervised and the student could not stop its
-    CoC (eval_phase1.md §1)."""
+    """`struct_span` covers exactly the `<|cot_end|><|traj_future_start|>` tokens."""
     segs = prompt.assistant_segments(coc_text="abc", traj_bins=list(range(128)))
     a = prompt.assemble(segs, **_stub())
     assert a.struct_span is not None
@@ -142,7 +132,7 @@ def test_special_tokens_cover_every_marker_the_template_emits():
         assert marker in prompt.SPECIAL_TOKENS, f"{marker} is emitted but never appended"
 
 
-# ---- generation mode for the stage-1 gate (2026-08-24) ----------------------
+# ---- generation mode ----------------------------------------------------------
 
 def _assemble(segs):
     return prompt.assemble(
@@ -156,13 +146,7 @@ def _assemble(segs):
 
 
 def test_generation_mode_stops_at_traj_future_start():
-    """The gate prefills up to the opening token and decodes the 128 bins itself.
-
-    Without `for_generation` the sequence ends on `<|traj_future_end|>`: the
-    `bins` segment is skipped when its values are None, but the CLOSING token is
-    not, so the student would be asked to continue a trajectory that has already
-    been closed.
-    """
+    """Generation mode ends on the opening trajectory token, not the closing one."""
     segs = prompt.assistant_segments(coc_text="slowing for the crosswalk",
                                      for_generation=True)
     assert prompt.render(segs).endswith("<|traj_future_start|>")

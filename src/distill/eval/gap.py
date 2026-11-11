@@ -1,44 +1,4 @@
-"""Headroom: how far apart are the teacher and the untrained student?
-
-Everything stage 1 and stage 2 can possibly achieve lives between these two
-numbers, on the same clips, with the same metric:
-
-    Alpamayo 1.5 (AV specialist)          -> the ceiling
-    Cosmos 3 Edge zero-shot, domain "av"  -> the floor
-
-Measure it BEFORE committing GPU weeks. A narrow gap is not a failure, it is a
-finding — but it is one you want before training, not after, because the
-response (higher LoRA rank, MLP targets, more data, a different teacher) is a
-design change, not a tuning change.
-
-Edge is not a blank slate here: `EMBODIMENT_TO_DOMAIN_ID` ships **"av": 1** with
-a 9-D action space, and NVIDIA publishes AV inverse-dynamics cookbooks. So the
-floor is a real model doing the real task, which is exactly what makes it the
-honest baseline.
-
-The two models never coexist in memory: each phase writes predictions to disk
-and `report` compares the files.
-
-CALIBRATION FIRST — read this before trusting any Edge number
---------------------------------------------------------------
-The teacher path is fully determined by code we have: the expert's rollout is in
-normalized action space and `UnicycleAccelCurvatureActionSpace.action_to_traj`
-converts it to metres.
-
-The Edge path has one genuine unknown: **the layout of the 9-D "av" action**.
-The open framework ships the domain id and the raw width but no AV dataset
-class, so the layout is inferred by analogy with every other pose embodiment in
-the repo (`camera_pose` is also 9-D; DROID/UMI are `[Pos(3), Rot6d(6), Gripper]`),
-giving frame-relative `[pos(3), rot6d(6)]`. That is an ASSUMPTION, marked
-[ASSUMED] at `av_actions_to_xyz`.
-
-It is also a *checkable* assumption, which is why `calibrate()` exists: run Edge
-in `inverse_dynamics` mode over the window's PAST video, where the true ego
-motion is already known from the dataset, and compare. If the decode is right,
-recovered past ≈ known past to well under a metre. If it is wrong, that shows up
-as a large calibration ADE and no prediction number should be believed. Run
-`calibrate` before `edge`.
-"""
+"""Teacher vs zero-shot student trajectory gap on the same windows."""
 from __future__ import annotations
 
 import dataclasses
@@ -58,17 +18,9 @@ AV_DOMAIN_NAME = "av"      # EMBODIMENT_TO_DOMAIN_ID["av"] == 1
 AV_RAW_ACTION_DIM = 9      # EMBODIMENT_TO_RAW_ACTION_DIM["av"] == 9
 
 
-# ---------------------------------------------------------------- teacher ----
-
 @torch.no_grad()
 def teacher_predictions(cfg, clip_ids: list[str], n_samples: int = 6) -> dict:
-    """Alpamayo 1.5 future trajectories, in metres, ego frame.
-
-    Uses the action expert's continuous rollout (`traj_samples`), NOT the
-    discrete token path — deliberately. Phase-B discrete emission is the open
-    D-022 risk; the expert rollout does not depend on it, so this number stays
-    meaningful even if D-022 fails.
-    """
+    """Alpamayo 1.5 future trajectories from the expert rollout, metres, ego frame."""
     from ..data.preprocess import iter_windows
     from ..teacher.wrapper import TeacherWrapper
 
@@ -79,7 +31,7 @@ def teacher_predictions(cfg, clip_ids: list[str], n_samples: int = 6) -> dict:
         for w_idx, window in iter_windows(cfg, clip_id):
             out = tw.label_window(
                 window,
-                k_flow=1,                      # flow targets are not needed here
+                k_flow=1,
                 topk=1,
                 max_coc=cfg.teacher.max_coc_tokens,
                 n_traj_samples=n_samples,
@@ -101,24 +53,8 @@ def teacher_predictions(cfg, clip_ids: list[str], n_samples: int = 6) -> dict:
             "model": "alpamayo1.5", "n_samples": n_samples}
 
 
-# ------------------------------------------------------------------ edge ----
-
 def av_actions_to_xyz(actions: torch.Tensor) -> torch.Tensor:
-    """[ASSUMED] Edge's 9-D "av" action chunk -> cumulative ego-frame xyz.
-
-    Assumed layout, per step: `[dx, dy, dz, r00, r10, r20, r01, r11, r21]` —
-    a frame-relative position delta followed by the first two columns of the
-    rotation matrix (rot6d), which is the layout every pose embodiment in
-    cosmos-framework uses (`camera_pose` 9-D; DROID/UMI `[Pos, Rot6d, Gripper]`).
-
-    Only the translation half is needed for ADE, and only x/y are scored, so the
-    rotation columns are carried through untouched rather than integrated —
-    a wrong rot6d convention cannot corrupt the metric, a wrong TRANSLATION
-    convention can. `calibrate()` is what catches the latter.
-
-    actions: (..., T, 9) frame-relative deltas. Returns (..., T, 3) cumulative
-    positions in the ego frame of the first step.
-    """
+    """Edge's 9-D action (assumed [dxyz, rot6d]) -> cumulative ego-frame xyz."""
     if actions.shape[-1] < 3:
         raise ValueError(f"expected >=3 action dims, got {actions.shape[-1]}")
     return torch.cumsum(actions[..., :3].float(), dim=-2)
@@ -126,17 +62,8 @@ def av_actions_to_xyz(actions: torch.Tensor) -> torch.Tensor:
 
 @dataclasses.dataclass
 class EdgeAVRunner:
-    """Zero-shot Cosmos 3 Edge on the AV embodiment.
-
-    Follows `scripts/action_policy_server_libero.py::predict_policy_batch`,
-    which is the framework's own action-inference path — same batch keys, same
-    `generate_samples_from_batch` call, `domain_name="av"` instead of a robot.
-
-    VALIDATE-ON-GPU: `camera`, `fps` and `resolution` below are OUR choices, not
-    the framework's. Edge is native 480p; our cached frames are the configured
-    `student_resolution`. If quality looks off, that is the first thing to check.
-    """
-    cfg: Any = None                    # distill.config.Cfg
+    """Zero-shot Cosmos 3 Edge on the AV embodiment."""
+    cfg: Any = None
     num_steps: int = 35
     guidance: float = 7.0
     seed: int = 0
@@ -171,13 +98,7 @@ class EdgeAVRunner:
 
     @torch.no_grad()
     def run(self, window, mode: str, action_length: int, prompt: str) -> torch.Tensor:
-        """One window -> (T, 9) predicted actions.
-
-        mode: "wam" jointly denoises future video and actions from the first
-        frame (the forecasting mode, what we want for the gap);
-        "inverse_dynamics" recovers actions from video that is fully given
-        (what `calibrate` uses).
-        """
+        """One window -> (T, 9) predicted actions ("wam" or "inverse_dynamics")."""
         from cosmos_framework.data.generator.action.utils.transforms import (
             build_sequence_plan_from_mode,
         )
@@ -242,13 +163,7 @@ def edge_predictions(cfg, clip_ids: list[str], horizon_steps: int = 64,
 
 @torch.no_grad()
 def calibrate(cfg, clip_ids: list[str], **runner_kw) -> dict:
-    """Gate on `av_actions_to_xyz` before any prediction number is believed.
-
-    Inverse dynamics recovers the ego motion that produced video we already
-    have, so the answer is known: the window's own past. A correct decode
-    reproduces it closely; a wrong translation layout or normalization shows up
-    here as a large error, on a run that costs minutes.
-    """
+    """Check `av_actions_to_xyz` by recovering the known past via inverse dynamics."""
     from ..data.preprocess import iter_windows
 
     runner = EdgeAVRunner(cfg=cfg, **runner_kw).load()
@@ -268,8 +183,6 @@ def calibrate(cfg, clip_ids: list[str], **runner_kw) -> dict:
     return {"per_window_ade": errs, "keys": keys,
             "mean_ade": float(np.mean(errs)) if errs else float("nan")}
 
-
-# ------------------------------------------------------------------ io ------
 
 def save(blob: dict, path: Path) -> Path:
     path = Path(path)

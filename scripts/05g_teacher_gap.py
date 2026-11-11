@@ -1,27 +1,6 @@
-"""How close is a student's free-running CoC to the TEACHER's, window by window?
-
-`05f_coc_gt_score.py` grades one dump's student and teacher traces against the
-driver and prints the two columns side by side. That answers "what are the two
-rates?" but not "is the difference real?", and a single 500-window draw carries
-+/-0.05-0.1 on the braking rows (D-052 addendum 2). This script closes both gaps:
-
-  * takes SEVERAL draws of the same checkpoint (the noise rule from the runbook)
-    and reports each row as mean over draws with the per-draw spread;
-  * pairs student against teacher ON THE SAME WINDOW, so the comparison is not
-    two independent rates but a within-window difference: discordant counts, an
-    exact McNemar per draw, and a bootstrap CI over windows (the unit that is
-    resampled - draws of one window are repeated measures, not extra windows);
-  * separates AGREEING WITH THE TEACHER from BEING RIGHT. A student that
-    reproduces the teacher's misses scores the same as the teacher on every
-    driver row while being no better at seeing the road, so the joint-failure
-    table (both wrong / only student right / only teacher right) is reported
-    next to the rates.
+"""Paired, multi-draw comparison of student vs teacher CoC against the driver.
 
     python scripts/05g_teacher_gap.py --dumps runs/<a>.jsonl runs/<b>.jsonl --split val
-
-The teacher column is identical across draws (cached labels), so all of its
-uncertainty is sampling of windows; the student's also includes decode noise,
-which is what averaging the draws removes.
 """
 from __future__ import annotations
 import argparse
@@ -44,8 +23,7 @@ BOOT = 4000
 
 
 def load_draw(path: Path) -> dict:
-    """dump -> {(clip, window): row}. Windows whose teacher trace is empty are
-    dropped, matching 05b's own n_scored."""
+    """dump -> {(clip, window): row}, dropping windows with an empty teacher trace."""
     out = {}
     for line in Path(path).read_text().splitlines():
         if not line.strip():
@@ -68,13 +46,9 @@ def severity(k: dict) -> str | None:
     return "stop" if k["vmin"] < 0.5 else "hard" if k["dv"] < -2.5 else "mild"
 
 
-# --------------------------------------------------------------- stats ----
-
 def boot_ci(s_by_win: list[list[float]], t_by_win: list[float],
             rng: np.random.Generator) -> tuple[float, float]:
-    """95% CI on (student - teacher) rate, resampling WINDOWS with replacement.
-    Each window carries its own per-draw student values, so decode noise rides
-    along with the window instead of being counted as independent evidence."""
+    """95% CI on (student - teacher) rate, bootstrapping windows."""
     n = len(t_by_win)
     if n == 0:
         return (float("nan"), float("nan"))
@@ -87,9 +61,7 @@ def boot_ci(s_by_win: list[list[float]], t_by_win: list[float],
 
 def paired_row(label: str, per_draw: list[dict], teacher: dict,
                rng: np.random.Generator) -> dict:
-    """per_draw[i][key] = 0/1 for the windows where the metric is defined in
-    draw i; teacher[key] likewise. Only windows defined in EVERY draw and for
-    the teacher are paired, so the columns are never computed on different sets."""
+    """Pair student draws and teacher on windows where the metric is defined in all."""
     keys = set(teacher)
     for d in per_draw:
         keys &= set(d)
@@ -101,8 +73,7 @@ def paired_row(label: str, per_draw: list[dict], teacher: dict,
     s_rate = float(np.mean(s_draw_rates)) if keys else float("nan")
     t_rate = float(np.mean(t_by_win)) if keys else float("nan")
     lo, hi = boot_ci(s_by_win, t_by_win, rng)
-    # Exact McNemar per draw: among windows where exactly one column is right,
-    # how often is it the student? p = 1.0 means the two are indistinguishable.
+    # Exact McNemar per draw on discordant windows.
     mc = []
     for d in per_draw:
         s_only = sum(1 for k in keys if d[k] > teacher[k])
@@ -155,10 +126,7 @@ def main() -> int:
 
     kin = {k: kin_for(cache_root, k) for k in common}
 
-    # -------------------------------------------------- driver-grounded ----
-    # gt_metrics returns None where a row is not checkable on that window; a row
-    # is paired only where BOTH columns are checkable (so a student that says
-    # nothing checkable is never scored against a teacher that did).
+    # Rows are paired only where both columns are checkable.
     rows_s = [{k: gt_reward.gt_metrics(d[k]["student"], kin[k]) for k in common} for d in draws]
     rows_t = {k: gt_reward.gt_metrics(draws[0][k]["teacher"], kin[k]) for k in common}
 
@@ -181,8 +149,6 @@ def main() -> int:
                   "reaction, so on\n         every window where both name a hazard the two "
                   "columns agree by construction.")
 
-    # ------------------------------------------- the user's braking rows ----
-    # "the driver slowed or stopped - did the CoC say so?", split by severity.
     def slow_field(src_rows, sev_filter):
         out = {}
         for k in common:
@@ -203,9 +169,7 @@ def main() -> int:
         braking.append(r)
         print(fmt(r, True))
 
-    # ------------------------------------------------------- over-claim ----
-    # The hedge check: on a window where the driver HELD speed, did the CoC
-    # claim a speed change anyway? This is the row run 6 gamed (D-049).
+    # Over-claim: driver held speed but CoC claimed a change.
     def overclaim(src_rows):
         out = {}
         for k in common:
@@ -221,7 +185,6 @@ def main() -> int:
                         overclaim({k: draws[0][k]["teacher"] for k in common}), rng)
     print(fmt(r_over, False))
 
-    # ---------------------------------------- agreement with the teacher ----
     print(f"\n-- agreement with the teacher (not correctness) {'-' * 56}")
     agree = defaultdict(list)
 
@@ -242,9 +205,7 @@ def main() -> int:
     for k, v in agree.items():
         print(f"  {k:<32} {np.mean(v):6.3f} [{min(v):.3f}-{max(v):.3f}]")
 
-    # ------------------------------------------------- joint failure ----
-    # The claim "as good as the teacher" is compatible with two very different
-    # worlds: independent errors that happen to balance, or the SAME errors.
+    # Joint failure: same errors vs independent errors.
     print(f"\n-- where the two disagree (draw-averaged windows) {'-' * 54}")
     for r in [g[0] for g in grounded] + braking + [r_over]:
         if not r["n"]:
@@ -259,7 +220,6 @@ def main() -> int:
         print(f"  {r['label']:<32} both {both:6.1f}  student-only {only_s:5.1f}  "
               f"teacher-only {only_t:5.1f}  neither {neither:6.1f}   (n={r['n']})")
 
-    # ------------------------------------------------ maneuver mixture ----
     print(f"\n-- maneuver mixture {'-' * 84}")
     s_man, t_man = Counter(), Counter()
     for d in draws:
@@ -271,10 +231,7 @@ def main() -> int:
     for m in sorted(set(s_man) | set(t_man), key=lambda m: -t_man[m]):
         print(f"  {m:<14} {s_man[m]:9.1f} {t_man[m]:9d}")
 
-    # ------------------------------------------------------- direction ----
-    # `direction_ok` scores a miss and a CONTRADICTION the same. They are not the
-    # same: naming the opposite direction is the failure D-038 caught the teacher
-    # in (one "turn left" in six was a right turn), and saying nothing is not.
+    # Contradiction (opposite direction) is scored separately from a miss.
     print(f"\n-- direction, split by how it fails {'-' * 69}")
     turns = [k for k in common if kin[k]["lateral"] != "straight"]
     straight = [k for k in common if kin[k]["lateral"] == "straight"]
@@ -297,9 +254,7 @@ def main() -> int:
         print(f"  {who:<8} names a direction on a STRAIGHT window: "
               f"{named:.0f}/{len(straight)} ({named / max(len(straight), 1):.0%})")
 
-    # ------------------------------------------------ confusion matrix ----
-    # The marginals can match while the windows do not. Rows = teacher, columns
-    # = what the student said on those same windows, averaged over draws.
+    # Rows = teacher, columns = student on the same windows, averaged over draws.
     print(f"\n-- what the student says where the teacher says X {'-' * 55}")
     conf = defaultdict(Counter)
     for d in draws:
@@ -312,14 +267,12 @@ def main() -> int:
         top = ", ".join(f"{sm} {c / tot:.0%}" for sm, c in conf[tm].most_common(4))
         print(f"  teacher {tm:<12} n={tot:6.1f}   student: {top}")
 
-    # --------------------------------------------------------- verbosity ----
     s_len = [np.mean([len(d[k]["student"].split()) for k in common]) for d in draws]
     t_len = np.mean([len(draws[0][k]["teacher"].split()) for k in common])
     print(f"\n-- length (words) {'-' * 86}")
     print(f"  student {np.mean(s_len):5.1f} [{min(s_len):.1f}-{max(s_len):.1f}]"
           f"   teacher {t_len:5.1f}")
 
-    # ------------------------------------------------ decode noise floor ----
     if len(draws) > 1:
         print(f"\n-- decode noise: draw vs draw, same checkpoint {'-' * 57}")
         pairs = [(i, j) for i in range(len(draws)) for j in range(i + 1, len(draws))]

@@ -1,19 +1,4 @@
-"""Does the student's trajectory depend on its own chain-of-causation? (D-040)
-
-GRPO in the recipe's shape trains the CoC THROUGH the trajectory it precedes:
-a CoC token is reinforced when rollouts containing it produced lower-ADE
-plans. That only works if the plan actually changes when the words change.
-Stage 1 trained the trajectory path teacher-forced on the TEACHER's CoC, so
-whether the student's plan follows the student's own reasoning is an
-assumption, not a measurement. This measures it.
-
-For N val windows, force a fixed set of CoCs (turn left / turn right / stop /
-accelerate / keep lane / follow / the cached teacher trace), decode the
-trajectory tokens after each, and report per CoC the mean final heading and
-mean speed, plus the within-window spread. Strong coupling: "turn left" and
-"turn right" pull the heading apart, "stop" and "accelerate" pull the speed
-apart. No coupling: every CoC yields the same plan - and no trajectory-based
-reward will ever move the reasoning.
+"""Does the student's trajectory depend on its own chain-of-causation?
 
     python scripts/05d_coc_intervention.py --ckpt <dir> [--cameras ...] --n 40 --samples 2
 """
@@ -145,7 +130,6 @@ def main() -> int:
         h = np.mean([r["coc"][nm]["head_end"] for r in rows]); v = np.mean([r["coc"][nm]["speed"] for r in rows])
         y = np.mean([r["coc"][nm]["ylat"] for r in rows]); ade = np.mean([r["coc"][nm]["ade"] for r in rows])
         log.info("  %-12s %+9.1f° %9.2f m/s %+9.2f m %7.2f m", nm, h, v, y, ade)
-    # Coupling summaries: how far apart do opposite instructions pull the plan?
     dh = np.mean([r["coc"]["turn_left"]["head_end"] - r["coc"]["turn_right"]["head_end"] for r in rows])
     dv = np.mean([r["coc"]["accelerate"]["v_end"] - r["coc"]["stop"]["v_end"] for r in rows])
     spread_h = np.mean([np.std([r["coc"][nm]["head_end"] for nm in names]) for r in rows])
@@ -153,7 +137,6 @@ def main() -> int:
     log.info("\n  coupling:  heading(turn_left) - heading(turn_right) = %+.1f°   "
              "v_end(accelerate) - v_end(stop) = %+.2f m/s", dh, dv)
     log.info("  within-window spread across the 7 CoCs:  heading sd %.1f°   ADE sd %.2f m", spread_h, spread_ade)
-    # Does the RIGHT CoC help? ADE with the matching-direction turn CoC on windows where the driver turned.
     turns = [r for r in rows if r["gt"]["lateral"].startswith("turn")]
     if turns:
         match = np.mean([r["coc"]["turn_left" if r["gt"]["lateral"] == "turn_left" else "turn_right"]["ade"] for r in turns])

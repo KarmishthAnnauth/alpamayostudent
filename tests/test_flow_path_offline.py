@@ -1,8 +1,4 @@
-"""CPU checks for student/flow_path.py: the context crop and the samplers.
-
-The gen pathway itself needs the real MoT layers (GPU smoke, scripts/03d);
-what can be pinned offline is the contract around it.
-"""
+"""CPU checks for student/flow_path.py: the context crop and the samplers."""
 import math
 import types
 
@@ -29,8 +25,7 @@ def test_context_key_mask_without_span_keeps_prompt():
 
 
 class _LinearFieldStudent:
-    """flow_forward returning the exact straight-line field u = a1 - a0 for the
-    interpolant a_t = t a1 + (1-t) a0: Euler then lands on a1 in one step or ten."""
+    """Exact straight-line field u = a1 - a0."""
     n_action_tokens = 64
     raw_action_dim = 2
 
@@ -68,8 +63,6 @@ def test_sde_sampler_returns_finite_logp_and_stays_near_data():
                             sde_noise=0.3, generator=g, return_trace=True)
     assert torch.isfinite(out["logp"]).all() and out["logp"].shape == (4,)
     assert len(out["trace"]) == 11
-    # the final step is deterministic: the last trace move equals dt * u exactly
-    # only for the ODE; here just check the endpoint is much closer to a1 than x0
     assert float((out["actions"] - a1).abs().mean()) < 0.5 * float((x0 - a1).abs().mean())
 
 

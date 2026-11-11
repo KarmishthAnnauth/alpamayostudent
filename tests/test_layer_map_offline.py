@@ -1,15 +1,4 @@
-"""Layer mapping and feature pooling — the two halves of stage 1's `feat` loss.
-
-Both were broken in ways that produce no error at all:
-
-* the map was one entry per STUDENT layer (28) onto 8 teacher layers, and
-  `FeatureProjections.forward` keys its output by teacher layer, so 20 of the 28
-  projections were silently discarded and trained on nothing;
-* the student's per-token hidden states were compared against the cache's
-  8 pooled segments, which is a shape error at step 1 — the only loud one here.
-
-torch-only, no GPU, no checkpoint.
-"""
+"""Layer mapping and feature pooling — the two halves of stage 1's `feat` loss."""
 import sys
 from pathlib import Path
 
@@ -96,7 +85,7 @@ def test_pooling_ignores_padding_and_the_teacher_forced_answer():
 
 
 def test_pooled_student_and_cached_teacher_are_comparable_shapes():
-    """The shape contract stage 1 broke: (B, pool, D_t) on both sides."""
+    """Shape contract: (B, pool, D_t) on both sides."""
     B, pool, d_s, d_t = 3, 8, 24, 16
     hidden = {0: torch.randn(B, 150, d_s)}
     n_prompt = torch.tensor([150, 130, 90])

@@ -1,23 +1,6 @@
-"""Phase 2: dump what the flow head READS, for a "is the cue in there?" probe.
-
-The flow head attends the reasoner's per-layer K/V (flow_path.build_flow_context).
-05m showed no post-hoc sample selection closes the T0 -> best-of-k gap and 05n
-showed the stop/departure cause is mostly visible in the frames, so the question
-is whether it survives into the context: phase 1's 05h (mean-pooled frozen vision
-tokens, PhysicalAI) found only +0.015 AUC over ego history for hard brakes.
-
-This writes, per labelled window, the context VALUES of a few layers (exactly
-what the action tokens mix; (L, 8 heads x 128) -> a fixed Gaussian random
-projection to --dim, which keeps linear decodability up to a small distortion,
-so the probe is a slight LOWER bound) plus the vision-token mask, ego history and
-labels; `05o_ctx_probe_fit.py` fits the probes.
-
-Labels (expert future, the first 3 s):
-  depart3  ego standing at t0 (v0 < 0.5 m/s): speed > 1 m/s within 3 s
-  brake3   ego moving at t0 (v0 > 2 m/s): speed < 0.6 v0 within 3 s
+"""Dump flow-head context values, ego history and depart/brake labels for probing.
 
     bash scripts/ada_run.sh scripts/05o_ctx_probe_extract.py --split val
-    bash scripts/ada_run.sh scripts/05o_ctx_probe_extract.py --split train
 """
 from __future__ import annotations
 import argparse
@@ -82,7 +65,7 @@ def main() -> int:
     student._reasoner_inputs = wrap
 
     dl = build_val_loader(cfg, student, split=a.split, n=a.n, batch=a.batch, coc=cfg.stage2.get("coc_cache"))
-    g = torch.Generator(device="cuda").manual_seed(0)              # ONE projection, shared by both splits
+    g = torch.Generator(device="cuda").manual_seed(0)              # shared projection
     P = torch.randn(1024, a.dim, device="cuda", generator=g) / a.dim ** 0.5
     files = {l: open(out / f"values_L{l}.f16", "wb") for l in layers}
     vis_f = open(out / "vis.u8", "wb")

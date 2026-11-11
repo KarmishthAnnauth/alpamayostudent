@@ -1,16 +1,6 @@
-"""Phase 2 baseline: the AR tower's DISCRETE trajectory tokens on Bench2Drive.
+"""Bench2Drive L2 of the AR tower's discrete trajectory tokens.
 
-What the base student could already do before the flow head existed: the
-stage-1 student (run-351/best + RL7 step-25 adapters = the phase-2 init) emits
-128 future-bin tokens after the CoC, detokenised through the teacher's unicycle
-action space (`student.detokenize_traj`, D-031 swap included). Same protocol as
-`coarse_minade` (context ends at <|traj_future_start|>, CoC teacher-forced from
-the stage-2 CoC cache, batch 1, sampling at the teacher's decode settings),
-on the Bench2Drive val windows instead of PhysicalAI, scored with the
-Bench2Drive open-loop L2 of `05m_sample_select.py` - so the numbers pair with
-the flow head's.
-
-    bash scripts/ada_run.sh scripts/05p_b2d_token_l2.py --out runs/sampler_probe/init-tokens-b2dL2-val.json
+    bash scripts/ada_run.sh scripts/05p_b2d_token_l2.py --out <json>
 """
 from __future__ import annotations
 import argparse

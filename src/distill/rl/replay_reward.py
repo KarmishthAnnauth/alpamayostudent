@@ -1,42 +1,7 @@
-"""Replay (non-reactive) reward for a sampled trajectory against the logged scene.
-
-PDM-shaped, after NAVSIM's score that ReCogDrive's DiffGRPO stage maximises:
+"""PDM-style replay reward for sampled trajectories against the logged scene.
 
     R = collision_free * corridor_ok * red_light_ok
         * (w_p * progress + w_ttc * ttc_ok + w_c * comfort) / (w_p + w_ttc + w_c)
-
-all terms in [0, 1], so R in [0, 1]. Gates are hard (a collision is a zero,
-whatever else the sample did), the weighted part is graded. Defaults follow
-ReCogDrive's PDMScorerConfig(progress 10, ttc 5, comfort 2).
-
-  collision_free  no overlap between the ego box along the sample and any
-                  logged actor box at the same frame, counted only while the
-                  ego is moving (NAVSIM's at-fault rule in its simplest form:
-                  a logged car driving into a stopped ego is not the plan's
-                  fault). Boxes are oriented rectangles, tested by the
-                  separating-axis theorem.
-  corridor_ok     the sample never leaves a corridor of `corridor_gate_m`
-                  around the expert's path (extended straight beyond its end
-                  so out-driving the expert on a straight road is allowed).
-                  This is the drivable-area proxy until the Bench2Drive map is
-                  wired in - the log is the only evidence of drivable space.
-  red_light_ok    while a light affecting the ego is red, the ego does not pass
-                  the light's trigger volume (+ margin) along the path.
-  progress        arc length reached along the expert's path, relative to the
-                  expert's own; 1 when the expert did not move (nothing to
-                  progress towards - the gates and comfort decide).
-  ttc_ok          the ego projected at its current speed and heading for
-                  0.5 s / 1 s never overlaps an actor's box at that frame.
-  comfort         NVIDIA's comfort bounds (alpamayo1_x_rl comfort_reward.py):
-                  fraction of the six metrics (lon/lat accel, jerk, lon jerk,
-                  yaw rate, yaw accel) that stay within bounds over the whole
-                  plan. The plan is prefixed with the t0 pose, so the first
-                  step's acceleration from the current speed counts.
-
-Hedge audit (phase-1.5 lesson, D-042): "stop now" gets collision_free = 1 by
-construction but progress 0 on any window where the expert moved and a
-comfort hit for the brake; "copy the expert" scores ~1; "drive off" fails the
-corridor gate. Measured on real windows by scripts/05l_reward_audit.py.
 """
 from __future__ import annotations
 import dataclasses
@@ -47,7 +12,7 @@ import numpy as np
 
 from ..data.b2d_scene import TL_RED, TL_NONE
 
-# NVIDIA comfort bounds (alpamayo1_x_rl/rewards/comfort_reward.py)
+# NVIDIA comfort bounds
 MAX_ABS_MAG_JERK = 8.37
 MAX_ABS_LAT_ACCEL = 4.89
 MAX_LON_ACCEL = 2.40
@@ -122,8 +87,7 @@ def _axes(c: np.ndarray) -> np.ndarray:
 
 
 def boxes_overlap(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-    """Separating-axis test of rectangles a (..., 4, 2) vs b (..., 4, 2),
-    broadcast over leading dims. A box with any NaN corner never overlaps."""
+    """Separating-axis overlap test of rectangles (..., 4, 2); NaN boxes never overlap."""
     a = np.asarray(a, dtype=np.float64); b = np.asarray(b, dtype=np.float64)
     shape = np.broadcast_shapes(a.shape[:-2], b.shape[:-2])
     a = np.broadcast_to(a, shape + (4, 2)); b = np.broadcast_to(b, shape + (4, 2))
@@ -143,7 +107,7 @@ def collision_mask(ego_c: np.ndarray, actor_c: np.ndarray) -> np.ndarray:
     return boxes_overlap(ego_c[:, None], actor_c[None]).any(axis=1)
 
 
-# ---- dynamics + comfort (numpy port of NVIDIA's comfort_reward.py) ---------
+# ---- dynamics + comfort ---------------------------------------------------
 
 def _diff(x: np.ndarray, dt: float) -> np.ndarray:
     d = x[..., 1:] - x[..., :-1]
@@ -185,9 +149,7 @@ def comfort_score(dyn: dict[str, np.ndarray]) -> np.ndarray:
 # ---- path frame ------------------------------------------------------------
 
 def path_polyline(ref_xy: np.ndarray, extension_m: float) -> tuple[np.ndarray, np.ndarray, float]:
-    """Expert path (T, 2) from t0+1 -> polyline (M, 2) from the origin, its
-    cumulative arc length (M,), and the expert's own total length (before the
-    straight extension along the final heading, or +x when it did not move)."""
+    """Expert path -> (extended polyline, cumulative arc length, expert path length)."""
     pts = np.concatenate([np.zeros((1, 2)), np.asarray(ref_xy, dtype=np.float64)], axis=0)
     seg = np.diff(pts, axis=0)
     seglen = np.linalg.norm(seg, axis=1)
@@ -230,13 +192,7 @@ def _actor_corners(scene: dict, classes: tuple[str, ...]) -> np.ndarray:
 
 def score(xy: np.ndarray, yaw: np.ndarray, scene: dict[str, Any], gt_future_xy: np.ndarray,
           cfg: RewardConfig | None = None) -> dict[str, np.ndarray]:
-    """Score N sampled plans of one window.
-
-    xy   (N, 64, 2) rear-axle waypoints at t0+0.1 .. t0+6.4 in the t0 frame
-    yaw  (N, 64) headings (from the action space's rotation output)
-    scene  `b2d_scene` dict of that window; gt_future_xy (64, 2) the expert's.
-    Returns per-sample arrays: reward and every term, all (N,).
-    """
+    """Score N sampled plans (N, 64, 2) of one window; returns per-sample terms."""
     cfg = cfg or RewardConfig()
     xy = np.asarray(xy, dtype=np.float64)[..., :2]
     yaw = np.asarray(yaw, dtype=np.float64)
@@ -314,8 +270,7 @@ def score(xy: np.ndarray, yaw: np.ndarray, scene: dict[str, Any], gt_future_xy: 
 
 
 def group_advantages(rewards: np.ndarray, eps: float = 1e-4, min_std: float = 1e-6) -> tuple[np.ndarray, np.ndarray]:
-    """(B, G) rewards -> (B, G) group-normalised advantages, (B,) skipped mask
-    (a group with no reward spread carries no signal, phase-1.5 convention)."""
+    """(B, G) rewards -> group-normalised advantages and (B,) zero-spread mask."""
     r = np.asarray(rewards, dtype=np.float64)
     mu = r.mean(axis=1, keepdims=True)
     sd = r.std(axis=1, keepdims=True)

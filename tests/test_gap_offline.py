@@ -1,9 +1,4 @@
-"""The parts of the headroom measurement that don't need a GPU.
-
-The metric arithmetic and the guard rails are worth pinning: a gap reported on
-mismatched windows, or an ADE averaged over the wrong axis, is worse than no
-number at all because it looks authoritative.
-"""
+"""The parts of the headroom measurement that don't need a GPU."""
 import sys
 from pathlib import Path
 
@@ -39,8 +34,7 @@ def test_min_ade_takes_the_best_mode():
 
 
 def test_av_actions_to_xyz_accumulates_deltas():
-    """Frame-relative deltas must integrate; treating them as absolute is the
-    failure the calibration phase exists to catch."""
+    """Frame-relative deltas must integrate."""
     act = torch.zeros(4, 9)
     act[:, 0] = 1.0                                       # 1 m forward per step
     xyz = gap.av_actions_to_xyz(act)

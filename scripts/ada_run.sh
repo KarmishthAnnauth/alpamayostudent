@@ -1,9 +1,6 @@
 #!/bin/bash
-# Run any python script on the shared Ada behind the standard guard: pin by
-# UUID, refuse if others hold > OTHERS_MAX_MIB, cap our share (MEM_FRAC) via the
-# sitecustomize shim. Never touches the Blackwell.
-#
-#     bash scripts/ada_run.sh scripts/05j_b2d_coc.py generate --n 100
+# Run a python script on the shared Ada GPU with a memory guard.
+#     bash scripts/ada_run.sh scripts/<x>.py args...
 set -euo pipefail
 MEM_FRAC=${MEM_FRAC:-0.60}
 OTHERS_MAX_MIB=${OTHERS_MAX_MIB:-4000}

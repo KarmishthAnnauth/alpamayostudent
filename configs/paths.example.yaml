@@ -1,0 +1,9 @@
+# Machine-specific paths. Copy to configs/paths.yaml; override per key with A2E_<KEY>.
+
+paths:
+  dataset_root: data/physicalai-av
+  cache_root: data/distill_cache
+  runs_root: outputs/runs
+  teacher_repo: models/alpamayo-1.5-10b
+  student_repo: models/cosmos3-edge
+  b2d_cache_root: data/b2d_cache_b2dnorm

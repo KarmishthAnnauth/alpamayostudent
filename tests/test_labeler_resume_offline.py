@@ -1,16 +1,4 @@
-"""Resuming a labeling run must not re-stream windows it is about to skip.
-
-`load_window` streams, decodes and resizes a window from the PhysicalAI-AV
-interface — by far the most expensive thing in the pass that is not the teacher
-itself. It used to run on every iteration, including the ones whose shard was
-already on disk, because `iter_windows` is a generator that loads before the
-caller can look at the filesystem.
-
-That is invisible in the output: the cache ends up correct either way. It only
-shows up as the nested increments paying for their predecessors twice — `--n
-2000` re-downloading all 500 already-labeled clips to write nothing — which is
-exactly the kind of cost nobody attributes to a bug. Hence a test.
-"""
+"""Resuming a labeling run must not re-stream windows it is about to skip."""
 import sys
 import types
 from pathlib import Path
@@ -51,8 +39,7 @@ CLIPS = ["clipA", "clipB"]
 
 @pytest.fixture
 def harness(tmp_path, monkeypatch):
-    """Runs `run_labeling` with every expensive call stubbed out, counting the
-    two that matter: window loads and teacher forwards."""
+    """Run `run_labeling` with expensive calls stubbed, counting loads and labels."""
     calls = types.SimpleNamespace(loads=[], inputs=[], labeled=[])
 
     def touch(p, text="x"):
@@ -92,14 +79,13 @@ ALL_CACHED = [(c, w, k) for c in CLIPS for w in (0, 1) for k in ("shard", "input
 
 def test_cold_cache_loads_every_window(harness):
     calls = harness([])
-    assert len(calls.loads) == 4          # 2 clips x 2 windows
+    assert len(calls.loads) == 4
     assert len(calls.labeled) == 4
     assert len(calls.inputs) == 4
 
 
 def test_fully_cached_resume_loads_nothing(harness):
-    """THE REGRESSION. Every shard and input already on disk: the pass must
-    touch neither the dataset interface nor the teacher."""
+    """Fully cached resume loads nothing."""
     calls = harness(ALL_CACHED)
     assert calls.loads == []
     assert calls.labeled == []
@@ -113,9 +99,7 @@ def test_partial_resume_loads_only_the_missing_clip(harness):
 
 
 def test_missing_student_inputs_still_force_a_load(harness):
-    """Shards present but inputs absent — the case that motivated writing the
-    student's view during labeling in the first place. The window has to be
-    re-loaded to produce them, but the teacher must NOT run again."""
+    """Shards present but student inputs absent still forces a load."""
     calls = harness([x for x in ALL_CACHED if x[2] == "shard"])
     assert len(calls.loads) == 4
     assert len(calls.inputs) == 4
@@ -123,10 +107,7 @@ def test_missing_student_inputs_still_force_a_load(harness):
 
 
 def test_window_anchors_are_unchanged_by_the_rewrite():
-    """`run_labeling` now enumerates `window_t0s_us` itself instead of going
-    through `iter_windows`. Shards are named by index and store no timestamp, so
-    the two must stay in lockstep or every cached shard silently repoints at
-    different video (see `preprocess.window_t0s_us`)."""
+    """`window_t0s_us` matches per-index `window_t0_us`."""
     from distill.data.preprocess import window_t0_us, window_t0s_us
 
     cfg = _cfg("/tmp")

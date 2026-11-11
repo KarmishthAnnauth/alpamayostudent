@@ -1,4 +1,4 @@
-"""GT-grounded CoC reward (D-038): pure functions on synthetic futures. No GPU."""
+"""GT-grounded CoC reward: pure functions on synthetic futures. No GPU."""
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -89,7 +89,7 @@ def test_gt_metrics_fields():
     assert m2["consistent"] is None and m2["hazard_ungrounded"] is True
 
 
-# ---- D-039: trajectory-through reward ----
+# ---- trajectory-through reward ----
 from distill.eval.gt_reward import ade_xy, traj_reward  # noqa: E402
 
 WT = SimpleNamespace(ade=1.0, ade_cap=3.0, kin=0.25, dir=0.25, teacher=0.0, fail=-2.0, max_tokens=48)
@@ -116,7 +116,7 @@ def test_traj_reward_shape_and_failures():
     assert worst > -2.0
 
 
-# ---- run 4: self-consistency against the student's own plan (D-040) ----
+# ---- self-consistency against the student's own plan ----
 
 def test_self_consistency_stop_vs_own_plan():
     assert self_consistency_term("STOP", None, future(10, 0.0)) == 1.0     # says stop, plan stops
@@ -129,21 +129,17 @@ def test_self_consistency_direction_against_own_plan():
     assert self_consistency_term("TURN", "left", future(8, 8, bearing_deg=70)) == 2.0    # kin + dir
     assert self_consistency_term("TURN", "left", future(8, 8, bearing_deg=-70)) == 0.0   # kin +1, dir -1
     assert self_consistency_term("TURN", "right", future(8, 8)) == -1.5                  # straight plan
-    # Silent about a turn while calling the plan KEEP. Was 0.0, when KEEP's free
-    # +0.5 cancelled the -0.5 for the missing direction; on the strict reward
-    # scale (D-042) KEEP earns nothing and the silence costs.
     assert self_consistency_term("KEEP", None, future(8, 8, bearing_deg=70)) == -0.5
 
 
-# ---- run 5: the hedge-free reward scale, and the metric scale it must not move (D-042) ----
+# ---- strict (hedge-free) reward scale ----
 
 HEDGES = ("FOLLOW", "KEEP", "ADAPT_SPEED", "NUDGE")
 SPECIFIC = ("STOP", "SLOW", "YIELD", "ACCELERATE", "TURN")
 
 
 def test_measurement_scale_is_unchanged_by_the_strict_flag():
-    """`gt_metrics` reads the DEFAULT scale. If these move, every run's
-    gt_consistent stops being comparable with every other run's."""
+    """`gt_metrics` reads the default (non-strict) scale."""
     k_quiet = kinematics(future(12, 12))                  # holds, straight, no braking
     assert kinematic_term("FOLLOW", k_quiet) == 0.5
     assert kinematic_term("KEEP", k_quiet) == 0.5
@@ -157,13 +153,12 @@ def test_strict_scale_stops_paying_the_hedge():
     k_brake = kinematics(future(12, 4))                   # braked from speed
     assert kinematic_term("FOLLOW", k_brake, strict=True) == -1.0     # still contradicted
     k_stop = kinematics(future(10, 0.0))
-    assert kinematic_term("ADAPT_SPEED", k_stop, strict=True) == 0.5  # was 1.0
+    assert kinematic_term("ADAPT_SPEED", k_stop, strict=True) == 0.5
     assert kinematic_term("ADAPT_SPEED", k_quiet, strict=True) == -0.5
 
 
 def test_strict_scale_makes_the_correct_specific_claim_win():
-    """The defect being fixed: ADAPT_SPEED tied or beat the best specific answer
-    in 63% of val windows. Under `strict` it must lose to the truth."""
+    """Under `strict`, hedges lose to the correct specific maneuver."""
     for fut, right in ((future(10, 0.0), "STOP"), (future(12, 4), "SLOW"), (future(5, 12), "ACCELERATE")):
         k = kinematics(fut)
         best = kinematic_term(right, k, strict=True)
@@ -173,8 +168,7 @@ def test_strict_scale_makes_the_correct_specific_claim_win():
 
 
 def test_strict_scale_offers_nothing_for_over_claiming_a_dull_window():
-    """A holds/straight window: no maneuver may score above 0, or the reward
-    teaches the student to invent events."""
+    """On a quiet window no maneuver scores above 0."""
     k = kinematics(future(12, 12))
     for m in HEDGES + SPECIFIC + ("LANE_CHANGE", None):
         assert kinematic_term(m, k, strict=True) <= 0.0, m

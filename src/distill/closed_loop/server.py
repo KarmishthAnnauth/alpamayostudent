@@ -1,24 +1,4 @@
-"""Closed-loop Bench2Drive: the model side.
-
-Holds the stage-2 student and answers plan requests from the leaderboard agent
-(`a2e_agent.py`) over a unix socket; see `a2e_common.py` for why there are two
-processes. One request = one training-shaped window (4 cameras x 4 frames, 16
-ego-history poses, route hint); the reply is one 6.4 s trajectory in the ego
-frame plus the CoC it was conditioned on.
-
-Per request, exactly what the open-loop evaluator does on a cached window
-(`Bench2DriveDataset.__getitem__` -> `collate_b2d` -> `eval/flow_minade.py`):
-
-    CoC     free-run from the `<|cot_start|>` prompt (`05j_b2d_coc.py generate`)
-            unless the agent hands the previous one back (slow-fast split: the
-            agent refreshes the CoC every ~2 s, the flow head every plan)
-    context prompt + history + hint + CoC up to `<|traj_future_start|>` (P2-05)
-    sample  k ODE samples, 10 Euler steps (P2-07), `action_to_traj` in the
-            cache's action space (the Bench2Drive-normalised one for runs >= 2)
-
-    bash scripts/ada_run.sh -m distill.closed_loop.server --socket /tmp/a2e.sock \
-        --ckpt runs/stage2/sft-run-4-b2d-arlora-traj-cocce/best
-"""
+"""Closed-loop Bench2Drive: the model side."""
 from __future__ import annotations
 
 import argparse
@@ -43,8 +23,7 @@ log = logging.getLogger("a2e_server")
 
 
 def load_student(cfg, ckpt: str | None):
-    """`scripts/05k_flow_minade.py::load_student`: a merged stage-2 checkpoint,
-    or the phase-2 init (untrained head) without one."""
+    """Load a merged stage-2 checkpoint, or the phase-2 init without one."""
     from .. import train_stage2 as ts2
     if ckpt is None:
         return ts2.load_student(cfg)

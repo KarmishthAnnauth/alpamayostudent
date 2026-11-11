@@ -1,19 +1,6 @@
-"""Offline checks for the LoRA plumbing (D-024). torch only — no GPU, no
-cosmos-framework, no checkpoints. Run before touching the GPU box:
+"""Offline numerical checks for the LoRA merge and masking helpers.
 
     python -m pytest tests/test_lora_offline.py -q
-
-What this actually buys: `merged_state_dict` and `merge_lora_` reimplement the
-adapter's forward as a weight edit, and a wrong scale or a transposed product
-there produces a checkpoint that loads cleanly and silently trains from the
-wrong weights in stage 2. These tests pin the equivalence numerically.
-
-`_StubLoraLinear` mirrors cosmos-framework's `LoraInjectedLinear`
-(utils/generator/lora.py) exactly where our helpers touch it: it subclasses
-nn.Linear, keeps the base weight at `.weight`, exposes `lora_A`/`lora_B`
-siblings and a `_lora_scale` of alpha/rank, and forwards as
-`base(x) + scale * B(A(x))`. Our helpers duck-type on `lora_A`/`lora_B`, so the
-stub exercises the real code paths.
 """
 import sys
 from pathlib import Path
@@ -52,8 +39,7 @@ class _Tiny(nn.Module):
         super().__init__()
         self.q_proj = _StubLoraLinear(nn.Linear(16, 16), rank, alpha)
         self.mlp = nn.Linear(16, 16)
-        # lora_B is zero-init in the framework, which would make every merge test
-        # trivially pass; train-like weights instead.
+        # non-zero lora_B so merges are actually tested
         nn.init.normal_(self.q_proj.lora_A.weight, std=0.05)
         nn.init.normal_(self.q_proj.lora_B.weight, std=0.05)
 
@@ -112,7 +98,7 @@ def test_scale_is_alpha_over_rank():
 def test_mask_rows_below_blocks_pretrained_rows():
     emb = nn.Embedding(10, 4)
     emb.weight.requires_grad_(True)
-    lora.mask_rows_below_(emb.weight, 7)          # only rows 7..9 are ours
+    lora.mask_rows_below_(emb.weight, 7)
     emb(torch.arange(10)).sum().backward()
     assert emb.weight.grad[:7].abs().sum() == 0
     assert emb.weight.grad[7:].abs().sum() > 0

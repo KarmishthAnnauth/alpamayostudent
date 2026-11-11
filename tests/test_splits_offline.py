@@ -1,11 +1,4 @@
-"""Splits: nesting, disjointness, and the challenging fallback. No torch, no GPU.
-
-The nesting property is the one worth pinning. `curation.curate` is deterministic
-per `(seed, clip_id)` so `curated_500 subset curated_2000`; if val membership were
-decided by position in the list instead of by clip id, every clip would be
-reassigned when the increment grew and the data-scaling curve would compare three
-different validation sets.
-"""
+"""Splits: nesting, disjointness, and the challenging fallback."""
 import sys
 from pathlib import Path
 

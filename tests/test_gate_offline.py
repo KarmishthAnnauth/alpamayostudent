@@ -1,14 +1,4 @@
-"""The stage-1 gate's arithmetic: which GT it scores against, and which decode
-path it detokenizes through.
-
-Neither failure mode here raises. `evaluate` scored ACTION-space GT as if it were
-positions and returned a plausible float in fake metres; the student detokenized
-without D-031's dim swap and produced trajectories ~20-128 m off, which reads as
-"the student did not learn" rather than "the decoder is transposed".
-
-torch-only, no GPU, no checkpoint: `detokenize_traj` is exercised as an unbound
-method over a stub so nothing has to load 9 GB of weights.
-"""
+"""Offline checks of the stage-1 gate's GT choice and decode path."""
 import sys
 from pathlib import Path
 
@@ -68,7 +58,7 @@ class _StubStudent:
 
 
 def test_student_detokenize_applies_the_dim_swap():
-    """D-031: the student emits in the teacher's order, `decode` reads encode's."""
+    """The student emits in the teacher's order; `decode` reads encode's."""
     from distill.student.edge_wrapper import EdgeStudent
 
     stub = _StubStudent()

@@ -1,4 +1,4 @@
-"""Adapter checkpoints carry the row-masked stage-1 tensors (D-046). Fake student."""
+"""Adapter checkpoints carry the row-masked stage-1 tensors."""
 import sys
 from pathlib import Path
 

@@ -1,12 +1,4 @@
-"""Open-loop minADE of the flow head on Bench2Drive windows.
-
-Shared by `scripts/05k_flow_minade.py` (standalone, per-window dump) and the
-stage-2 trainer's per-epoch gate. k samples per window from the ODE sampler,
-converted through the teacher's unicycle action space, minADE_k / minFDE_k in
-the ego xy plane against the expert's future; the constant-velocity baseline
-(zero normalised action) is reported next to it because that is what an
-untrained head effectively emits (the smoke measured 7.0 m vs CV 6.0 m).
-"""
+"""Open-loop minADE of the flow head on Bench2Drive windows."""
 from __future__ import annotations
 import functools
 import logging
@@ -34,10 +26,7 @@ def build_val_loader(cfg, student, split: str = "val", n: int | None = None, bat
                                 clip_ids=b2d.load_b2d_split(root, split),
                                 coc_lookup=b2d.coc_lookup_from_cache(coc), for_generation=True)
     if n is not None and len(ds) > n:
-        # Deterministic SEEDED subset: fixed across epochs like the stage-1 gate's
-        # prefix, but shards are ordered by clip id, so a prefix is one or two
-        # scenarios (the smoke's 16 windows were all AccidentTwoWays). A seeded
-        # permutation covers the scenario mix.
+        # Seeded subset so it spans scenarios.
         g = torch.Generator().manual_seed(int(seed))
         ds = Subset(ds, torch.randperm(len(ds), generator=g)[:n].tolist())
     return DataLoader(ds, batch_size=batch, shuffle=False, num_workers=num_workers,
@@ -47,10 +36,7 @@ def build_val_loader(cfg, student, split: str = "val", n: int | None = None, bat
 @torch.no_grad()
 def evaluate_flow(cfg, student, dl, k: int = 6, steps: int = 10, temperature: float = 1.0,
                   per_window: bool = False, with_t0: bool = True) -> dict:
-    """`with_t0`: also draw the deterministic x0 = 0 sample per window (what the
-    closed-loop agent drives) and report its ADE as `t0_ade` - the car drives
-    ONE plan, and best-of-k rewards covering go AND stay (sampler probe 2026-10-05:
-    best-of-16 1.44 m vs T0 3.39 m on run 4)."""
+    """minADE/minFDE over k samples; `with_t0` also scores the deterministic x0 = 0 sample."""
     was_training = student.training
     student.eval()
     space = b2d.load_cache_action_space(Path(cfg.paths.b2d_cache_root), Path(cfg.paths.teacher_repo))
@@ -87,9 +73,7 @@ def evaluate_flow(cfg, student, dl, k: int = 6, steps: int = 10, temperature: fl
                         "cv_ade": float(cv_disp.mean()),
                         "t0_ade": float(t0_disp.mean()) if with_t0 else float("nan"),
                         "v0": float(batch["ego_speed_t0"][b]),
-                        # truncated horizons: minADE over the first H steps (min over the
-                        # k samples per horizon) next to constant velocity, because a
-                        # 6.4 s mean hides where on the horizon the error lives
+                        # truncated horizons
                         "minade_h": {h: float(disp[:, :n].mean(-1).min()) for h, n in HORIZONS.items()},
                         "meanade_h": {h: float(disp[:, :n].mean()) for h, n in HORIZONS.items()},
                         "cv_h": {h: float(cv_disp[:n].mean()) for h, n in HORIZONS.items()}})

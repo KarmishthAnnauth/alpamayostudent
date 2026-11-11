@@ -1,10 +1,4 @@
-"""`traj_tokenizer_spec.pt` must survive torch.save.
-
-`scripts/00_verify.py` — the FIRST thing that runs on the GPU box — writes the
-spec with `torch.save`, and everything downstream reads it back. Anything in
-that dict that pickle cannot handle kills step one of the pipeline. A closure
-did exactly that once (D-029), hence this test.
-"""
+"""`traj_tokenizer_spec.pt` must survive torch.save."""
 import pickle
 import sys
 from pathlib import Path
@@ -21,8 +15,6 @@ class _StubTokenizer:
     vocab_size = 1000
 
     def encode(self, hist_xyz, hist_rot, fut_xyz, fut_rot):
-        # Record the inversion the real call relies on: the history is passed
-        # as the FUTURE argument, with one reference pose as the history.
         assert hist_xyz.shape[1] == 1, "reference pose must be a single frame"
         return torch.zeros(fut_xyz.shape[0], 48, dtype=torch.long)
 

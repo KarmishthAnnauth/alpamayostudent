@@ -1,25 +1,4 @@
-"""Window + cached teacher targets -> student model inputs.
-
-This is the Stage-1 input assembly that `HANDOFF.md` listed as open. It is
-deliberately a standalone object rather than a method on `EdgeStudent`: a
-DataLoader worker must be able to build contexts, and `EdgeStudent` owns 9GB of
-CUDA weights. `ContextBuilder` holds only a tokenizer, an image processor, and a
-handful of integers.
-
-What it produces, per window (D-028's format, `prompt.py` holds the template):
-
-    input_ids       the full teacher-forced sequence
-    pixel_values    processed camera frames, Edge's own patch layout
-    image_grid_thw  [n_images, 3]
-    coc_span        where the teacher's CoC text sits  -> text KD
-    struct_span     the `<|cot_end|><|traj_future_start|>` boundary tokens -> structural CE
-    traj_span       where the 128 future bins sit      -> trajectory KD
-    n_prompt        user/assistant boundary
-
-Ego motion needs no side-channel: it is 48 discrete history bins written into
-the reserved slots (D-029), so it arrives inside `input_ids` like everything
-else.
-"""
+"""Window + cached teacher targets -> student model inputs."""
 from __future__ import annotations
 
 import dataclasses
@@ -35,35 +14,12 @@ log = logging.getLogger(__name__)
 
 
 def load_image_processor(ckpt: str):
-    """Edge's own image processor.
-
-    RESOLVED on the GPU box 2026-08-28 (was D-029's last VALIDATE-ON-GPU item).
-    The snapshot's `preprocessor_config.json` names `Cosmos3EdgeImageProcessor`
-    and `processor_class: Cosmos3EdgeProcessor` — classes that exist only in
-    transformers@main, not in the pinned 4.57.1. On 4.x, `AutoProcessor`
-    therefore SILENTLY degrades to a bare `PreTrainedTokenizerFast`: no
-    exception, no `image_processor` attribute, so the old
-    `getattr(proc, "image_processor", proc)` handed back the tokenizer and the
-    first batch died in `_encode_images` with "You need to specify either `text`
-    or `text_target`". `AutoImageProcessor` is no fallback either — it rejects
-    the same config for an unrecognized `image_processor_type`.
-
-    cosmos-framework ships a native port for exactly this case
-    (`build_cosmos3_edge_processor`, golden-pinned against the old remote-code
-    object by its own `cosmos3_edge_processing_test.py`), so use it whenever the
-    directory is a renewed Edge snapshot and keep AutoProcessor for everything
-    else.
-    """
+    """Edge's own image processor."""
     from transformers import AutoImageProcessor, AutoProcessor
     try:
         from cosmos_framework.data.generator.processors.cosmos3_edge_processing import (
             build_cosmos3_edge_processor, is_cosmos3_edge_native_snapshot)
         if is_cosmos3_edge_native_snapshot(ckpt):
-            # The inner image processor, not the wrapper: the wrapper's
-            # `__call__` expands placeholders inside `text` and raises on
-            # text=None, and ContextBuilder assembles its own token stream.
-            # The wrapper's spatial_shapes->image_grid_thw conversion is
-            # reproduced in `_encode_images` instead.
             proc = build_cosmos3_edge_processor(ckpt)
             ip = getattr(proc, "image_processor", None)
             if ip is None:
@@ -80,25 +36,13 @@ def load_image_processor(ckpt: str):
     ip = getattr(proc, "image_processor", None)
     if ip is not None:
         return ip
-    # Do NOT fall through to `proc` itself: a degraded AutoProcessor is a
-    # tokenizer, and calling it with images= fails much later and far away.
     log.info("AutoProcessor exposed no image_processor (%s); trying "
              "AutoImageProcessor", type(proc).__name__)
     return AutoImageProcessor.from_pretrained(ckpt)
 
 
 def _grid_from_encoding(enc):
-    """`(pixel_values [N_patches, C*p*p], image_grid_thw [n_images, 3])`.
-
-    Two producer conventions reach here. Qwen-style processors return
-    `image_grid_thw` directly. Cosmos3-Edge's `Siglip2ImageProcessorCustom`
-    returns the SigLIP2 pair `(pixel_values, spatial_shapes [n_images, 2])`
-    instead, and the reasoner's `prepare_multimodal_reasoner_inputs` only speaks
-    thw. The conversion below is the one Edge's own processor `__call__` applies
-    (cosmos_framework/data/generator/processors/cosmos3_edge_processing.py):
-    flatten pixel_values to two dims and prepend a t=1 column — still images, so
-    one temporal step each.
-    """
+    """`(pixel_values [N_patches, C*p*p], image_grid_thw [n_images, 3])`."""
     pixel_values = enc["pixel_values"]
     if "image_grid_thw" in enc:
         return pixel_values, enc["image_grid_thw"]
@@ -108,9 +52,6 @@ def _grid_from_encoding(enc):
     return pixel_values, torch.cat([t_dim, ss], dim=1)
 
 
-#: A trajectory-prefix value the dataset uses to mean "hidden" (D-045). It maps
-#: to the `<|traj_history|>` placeholder id, which never otherwise appears in a
-#: training sequence: the history slots are always filled with real bins.
 PREFIX_MASK = -1
 
 
@@ -133,9 +74,7 @@ class ContextBuilder:
     special_ids: dict[str, int]
     image_token_id: int
     hist_tokenize: Callable | None = None
-    merge_size: int = 1          # spatial_merge_size; grid tokens // merge_size**2
-
-    # ---- pieces -------------------------------------------------------------
+    merge_size: int = 1
 
     def _encode_text(self, text: str) -> list[int]:
         return self.tokenizer(text, add_special_tokens=False).input_ids
@@ -149,12 +88,7 @@ class ContextBuilder:
         return [int(b) for b in bins[0]]
 
     def _encode_images(self, window):
-        """Camera frames -> (pixel_values, image_grid_thw, tokens per image).
-
-        Frames are taken at STUDENT resolution (`preprocess.load_window` already
-        resized them) and ordered exactly as the prompt orders the cameras:
-        ascending camera index, then frame order.
-        """
+        """Camera frames -> (pixel_values, image_grid_thw, tokens per image)."""
         if self.image_processor is None:
             return None, None, []
         frames = []
@@ -163,28 +97,15 @@ class ContextBuilder:
             frames.extend(arr[i] for i in range(min(self.n_frames, len(arr))))
         enc = self.image_processor(images=frames, return_tensors="pt")
         pixel_values, grid = _grid_from_encoding(enc)
-        # One image's placeholder count is its grid volume after the spatial
-        # merge — the same arithmetic HF processors use to expand <image>.
         per_image = [int(t * h * w) // (self.merge_size ** 2)
                      for t, h, w in grid.tolist()]
         return pixel_values, grid, per_image
-
-    # ---- the whole thing ----------------------------------------------------
 
     def build(self, window, coc_text: str | None = None,
               traj_bins: list[int] | None = None,
               nav_text: str | None = None,
               for_generation: bool = False) -> dict:
-        """Teacher-forced sequence when targets are given; a generation prompt
-        when they are not (the assistant turn then opens `<|cot_start|>` and
-        stops, exactly as the released `create_message` does).
-
-        `for_generation=True` alongside a `coc_text` builds the stage-1 gate's
-        prefill: everything up to and including `<|traj_future_start|>`, with the
-        128 trajectory positions left for the student to emit. `traj_span` is
-        then None — there is nothing to score teacher-forced — and `input_ids`
-        ends exactly where decoding starts.
-        """
+        """Teacher-forced sequence when targets are given; a generation prompt otherwise."""
         pixel_values, grid, per_image = self._encode_images(window)
 
         user = prompt_mod.user_segments(

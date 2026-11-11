@@ -1,18 +1,4 @@
-"""Bench2Drive window builder, on ONE extracted clip, CPU only.
-
-What is pinned here and why:
-
-  - coordinate conventions: CARLA is left-handed (+y right); the student frame
-    is +y LEFT (D-038). A positive CARLA `steer` is a RIGHT turn, so the
-    ego-frame future must go to NEGATIVE y with a negative yaw. Getting this
-    wrong trains the flow head on mirrored turns and no loss curve would show it.
-  - speeds from consecutive poses match the annotation's `speed`.
-  - `action_to_traj(traj_to_action(future))` reproduces the future - the
-    action space is the teacher's, and the round trip is only tight when the
-    reference point is the rear axle (`bench2drive.REAR_AXLE_OFFSET_M`).
-  - shapes and keys match what `student/context.py` and `data/frames.py` read.
-  - splits never put a route on both sides.
-"""
+"""Bench2Drive window builder, on ONE extracted clip, CPU only."""
 from __future__ import annotations
 
 import sys
@@ -31,13 +17,7 @@ from distill.data import frames as frames_mod              # noqa: E402
 from distill.eval import gt_reward                         # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
-#: A clip with a sustained positive-steer stretch (17 frames > 0.15 from frame
-#: 131, ~3.5 m/s). Any other `.done` clip is used when it is absent. It is an
-#: aggressive clip (launches from standstill through a turn, a 0.7-steer swerve
-#: at 10 m/s, an emergency stop at 16 m/s^2), which is what the round-trip
-#: test's regimes below are about.
 PREFERRED_CLIP = "Accident_Town05_Route219_Weather11"
-#: Ordinary driving, for the strict round-trip bound. First `.done` match wins.
 GENTLE_PREFIXES = ("HighwayExit_", "NonSignalizedJunctionLeftTurn_", "LaneChange_")
 SPEC = Path("/bulk/users/vla/alpamayo2edge/distill_cache/traj_tokenizer_spec.pt")
 
@@ -81,8 +61,6 @@ def windows(anno, params, space):
     return out
 
 
-# ---- pure functions --------------------------------------------------------
-
 def test_parse_clip_id():
     m = b2d.parse_clip_id("NonSignalizedJunctionLeftTurn_Town12_Route1017_Weather7")
     assert (m.scenario, m.town, m.route, m.weather) == (
@@ -96,7 +74,7 @@ def test_parse_clip_id():
 
 def test_tele_crop_box_is_30deg_16_9():
     x0, y0, x1, y1 = b2d.tele_crop_box()
-    assert (x0, x1) == (494, 1106)                      # 2 * 1142.5 * tan(15 deg) = 612 px
+    assert (x0, x1) == (494, 1106)
     assert (x1 - x0, y1 - y0) == (612, 344)
     assert abs((x1 - x0) / (y1 - y0) - 16 / 9) < 0.01
     assert (x0 + x1) / 2 == 800 and (y0 + y1) / 2 == 450
@@ -119,11 +97,9 @@ def test_route_hint_uses_the_existing_vocabulary():
 
 def test_action_space_is_the_release_one(space):
     assert space.n_waypoints == 64 and abs(space.dt - 0.1) < 1e-9
-    assert abs(float(space.accel_std) - 0.6810426736454882) < 1e-6      # fp32 buffers
+    assert abs(float(space.accel_std) - 0.6810426736454882) < 1e-6
     assert abs(float(space.curvature_std) - 0.026148280660833106) < 1e-7
 
-
-# ---- one real clip ---------------------------------------------------------
 
 def test_window_shapes_and_frame(anno, windows, params):
     w = windows[0]
@@ -140,14 +116,11 @@ def test_window_shapes_and_frame(anno, windows, params):
     assert w.gt_future_xyz.shape == (64, 3) and w.gt_future_rot.shape == (64, 3, 3)
     assert w.expert_controls.shape == (64, 3)
     assert w.t0_us == w.anchor_frame * 100_000
-    # t0 is the origin with identity heading; history runs backwards along -x.
     h = w.data["ego_history_xyz"][0, 0].numpy()
     assert np.allclose(h[-1], 0.0) and np.allclose(w.data["ego_history_rot"][0, 0, -1].numpy(), np.eye(3), atol=1e-6)
     assert np.all(h[:-1, 0] <= 1e-6)
-    # Rotations stay proper (det +1) after the reflection S R S.
     dets = np.linalg.det(w.gt_future_rot)
     assert np.allclose(dets, 1.0, atol=1e-4)
-    # Forward motion: the future moves to +x when the car is moving.
     if w.ego_speed_t0 > 1.0:
         assert w.gt_future_xyz[9, 0] > 0.0
 
@@ -156,15 +129,14 @@ def test_speed_from_poses_matches_anno(anno, windows):
     worst = 0.0
     for w in windows:
         f = w.gt_future_xyz[:, :2]
-        v = np.linalg.norm(np.diff(f, axis=0), axis=1) * 10.0      # between wp i+1 and i+2
+        v = np.linalg.norm(np.diff(f, axis=0), axis=1) * 10.0
         ref = anno.speed[w.anchor_frame + 2: w.anchor_frame + 65]
         worst = max(worst, float(np.median(np.abs(v - ref))))
     assert worst < 0.3, f"median |pose speed - anno speed| {worst:.3f} m/s"
 
 
 def test_positive_steer_is_a_right_turn_negative_y(anno, params, space):
-    """CARLA +steer = right. In the +y-LEFT ego frame a right turn is -y, -yaw;
-    the raw CARLA frame (before the flip) shows the opposite sign."""
+    """Positive CARLA steer maps to negative ego y."""
     st = anno.steer
     run, best = 0, (0, 0)
     for i, s in enumerate(st):
@@ -176,11 +148,10 @@ def test_positive_steer_is_a_right_turn_negative_y(anno, params, space):
         pytest.skip("clip has no sustained positive-steer stretch")
     t0 = min(max(15, start - 2), anno.n - 65)
     w = b2d.build_window(anno, t0, params, space, with_frames=False)
-    k = min(start - t0 - 1 + length, 63)                    # end of the stretch
+    k = min(start - t0 - 1 + length, 63)
     f, rot = w.gt_future_xyz, w.gt_future_rot
     assert f[k, 1] < -0.5, f"expected negative y for a right turn, got {f[k, 1]:.2f}"
     assert b2d.yaw_of(rot[k]) < -0.05
-    # And in the CARLA frame, before the flip, the same point is at +y.
     fut = np.arange(t0 + 1, t0 + 65)
     T = anno.world2ego[t0][None] @ np.linalg.inv(anno.world2ego[fut])
     assert T[k, 1, 3] > 0.5 and np.isclose(T[k, 1, 3], -f[k, 1], atol=1e-3)
@@ -192,22 +163,7 @@ def _round_trip(w, space):
 
 
 def test_action_round_trip_regimes(anno, windows, space):
-    """action_to_traj(traj_to_action(future)) ~ future, by regime.
-
-    The release action space is exact on the teacher's own data (0.002-0.24 m
-    at 6.4 s on cached PhysicalAI-AV windows) and on ordinary Bench2Drive
-    driving once the ego frame sits at the rear axle (`test_gentle_clip_round_trip`).
-    Two Bench2Drive regimes fall outside what a unicycle with the release
-    regularisation can represent, and they are pinned here at their measured
-    level so a regression in the CONVERSION (which would move the steady
-    windows too) is still caught:
-      launch    the car starts below 1 m/s and steers in the first second; the
-                space clamps curvature to zero under 0.6 m/s, so a few degrees
-                of early heading error become 1-1.7 m over the horizon.
-      steady    the car never drops below 1 m/s: 0.16-0.4 m at 6.4 s, the top
-                of that range being a 0.7-steer swerve at 10 m/s (tyre slip).
-    Before the rear-axle shift the steady windows sat at 0.5-1.1 m.
-    """
+    """action_to_traj(traj_to_action(future)) ~ future, by regime."""
     steady, launch = [], []
     for w in windows:
         vmin = float(anno.speed[w.anchor_frame: w.anchor_frame + 65].min())
@@ -218,26 +174,18 @@ def test_action_round_trip_regimes(anno, windows, space):
     assert max(last) < 0.5, f"steady round trip {max(last):.3f} m at 6.4 s"
     assert max(mean) < 0.3
     for e in launch:
-        assert float(e[-1]) < 2.0 and float(e[:20].max()) < 0.3   # the loss is late and lateral
+        assert float(e[-1]) < 2.0 and float(e[:20].max()) < 0.3
 
 
 def test_round_trip_floor_over_clips(params, space):
-    """The action-space floor over the first 20 extracted clips, and the pin
-    that the rear-axle ego origin is what makes it tight.
-
-    Measured 2026-09-28 on 1372 windows of 150 clips (err at 6.4 s): all
-    windows p50 0.03 m / p90 0.50 m; windows where the car never drops below
-    1 m/s p50 0.07 / p90 0.46 / max 0.92 m. With the CARLA actor origin instead
-    of the rear axle the heading leads the travel direction by 3 deg on
-    average and the moving windows sit at 0.5-1.1 m.
-    """
+    """Action-space round-trip floor over extracted clips, with and without the rear-axle shift."""
     root = b2d.DEFAULT_ROOT
     if not root.exists():
         pytest.skip(f"{root} not mounted")
     clips = b2d.list_done_clips(root)[:20]
     if len(clips) < 5:
         pytest.skip("fewer than 5 extracted clips")
-    err = {0.0: [], b2d.REAR_AXLE_OFFSET_M: []}     # (turning?, steady?, err) per window
+    err = {0.0: [], b2d.REAR_AXLE_OFFSET_M: []}
     for c in clips:
         for l_r, acc in err.items():
             a = b2d.load_clip_anno(c, params.cameras, rear_axle_offset_m=l_r)
@@ -252,8 +200,6 @@ def test_round_trip_floor_over_clips(params, space):
     assert np.median(all_err) < 0.2
     assert np.median(steady) < 0.3 and np.percentile(steady, 90) < 0.7, \
         f"steady p50 {np.median(steady):.2f} p90 {np.percentile(steady, 90):.2f}"
-    # The reference point only matters where the car turns (slip ~ l_r * curvature):
-    # measured 0.535 -> 0.196 m median on |yaw| > 20 deg windows of these clips.
     turn0 = [e for t, _, e in err[0.0] if t]
     turn1 = [e for t, _, e in ours if t]
     if len(turn1) >= 5:
@@ -261,8 +207,7 @@ def test_round_trip_floor_over_clips(params, space):
 
 
 def test_gentle_clip_round_trip(params, space):
-    """Ordinary driving: every window of a HighwayExit/junction/lane-change
-    clip stays under the measured cross-clip steady max (0.92 m)."""
+    """Every window of a gentle clip round-trips under 1 m."""
     root = b2d.DEFAULT_ROOT
     if not root.exists():
         pytest.skip(f"{root} not mounted")
@@ -289,8 +234,6 @@ def test_labels_and_route(anno, windows, space):
         assert w.action_floor_m == pytest.approx(float(_round_trip(w, space)[-1]), abs=1e-4)
         assert w.meta.clip_id == anno.meta.clip_id and w.weather == anno.weather
 
-
-# ---- cache + dataset -------------------------------------------------------
 
 class _StubContext:
     """Records what the context builder was handed; no tokenizer needed."""
@@ -330,7 +273,6 @@ def test_cache_layout_matches_labeler(cache, windows, params):
     assert set(back.frames_student) == set(params.cameras)
     for cam in params.cameras:
         assert back.frames_student[cam].shape == windows[0].frames_student[cam].shape
-        # JPEG q92 round trip: same picture, not a channel swap.
         d = np.abs(back.frames_student[cam].astype(int) - windows[0].frames_student[cam].astype(int))
         assert d.mean() < 6.0
     assert tuple(back.data["ego_history_xyz"].shape) == (1, 1, 16, 3)
@@ -346,7 +288,6 @@ def test_dataset_and_collate(cache, windows):
     assert ctx.calls[-1]["for_generation"] is True and ctx.calls[-1]["coc_text"] is None
     assert tuple(it["hist_xyz"].shape) == (16, 3) and tuple(it["hist_rot"].shape) == (16, 3, 3)
     assert it["img_drop"] is False
-    # Synthesised GT flow tuples in the teacher's convention (D-012).
     t, a_t, v = it["flow_t"], it["flow_a_t"], it["flow_v"]
     a1 = torch.as_tensor(it["gt_traj"])
     a0 = (a_t - t.view(-1, 1, 1) * a1) / (1 - t.view(-1, 1, 1))
@@ -361,7 +302,6 @@ def test_dataset_and_collate(cache, windows):
     assert tuple(batch["input_ids"].shape) == (2, max(lens))
     assert batch["attention_mask"].sum(1).tolist() == lens
     assert batch["clip_ids"] == [windows[0].clip_id] * 2 and batch["window_idx"] == [0, 1]
-    # Kinematic route hint source, and a CoC lookup with teacher forcing.
     ds2 = b2d.Bench2DriveDataset(cache, ctx, route_source="kinematic",
                                  coc_lookup=lambda c, w: "Stay in lane.", for_generation=False)
     it2 = ds2[1]
@@ -386,12 +326,9 @@ def test_splits_never_share_a_route():
 
 @pytest.mark.skipif(not SPEC.exists(), reason="teacher tokenizer spec not on this box")
 def test_teacher_tokenizers_accept_the_windows(anno, params, space):
-    """The history tokenizer (48 bins) and the future tokenizer (128 bins,
-    emission order) run on B2D windows; decoding the GT bins lands within the
-    quantisation floor of the future."""
+    """Teacher history/future tokenizers run on B2D windows and round-trip the GT."""
     from distill.teacher.wrapper import swap_action_dims
     spec = torch.load(SPEC, weights_only=False)
-    # The steadiest window: the token path shares the action space's regimes.
     t0 = max(b2d.anchor_frames(anno.n, params.stride),
              key=lambda t: anno.speed[t: t + 65].min())
     w = b2d.build_window(anno, t0, params, space, with_frames=False,
@@ -403,5 +340,4 @@ def test_teacher_tokenizers_accept_the_windows(anno, params, space):
     xyz, _, _ = spec["detokenizer_fn"](w.data["ego_history_xyz"][:, -1],
                                        w.data["ego_history_rot"][:, -1], toks)
     err = np.linalg.norm(xyz[0, :, :2].numpy() - w.gt_future_xyz[:, :2], axis=1)
-    # Action-space floor (< 0.5 m on a steady window) + the 0.13 m bin floor.
     assert err[-1] < 1.0, f"token round trip {err[-1]:.3f} m at 6.4 s"

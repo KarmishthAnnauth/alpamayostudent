@@ -1,30 +1,4 @@
-"""Phase 2: is "departs / brakes within 3 s" decodable from what the flow head reads?
-
-Fits probes on the dump of `05o_ctx_probe_extract.py` (train routes) and scores
-val routes. The comparison that matters is the LIFT over ego history, because
-ego history is what the head demonstrably uses (D-046, 05h): a car already
-slowing is predictable from its own speed trace.
-
-Arms (ego features enter linearly in every arm):
-  ego          16-step history: per-step speeds, accelerations, v0
-  +mean_vis    + mean-pooled vision tokens (05h's setup, phase 1: +0.015 AUC)
-  +attn_vis    + learned attention pooling (4 queries) over the vision tokens -
-               a lead car is a few tokens of 3,520, which mean-pooling dilutes
-  +attn_all    + attention pooling over ALL context tokens (vision, prompt,
-               history, the teacher-forced CoC)
-  +attn_text   + attention pooling over the 215 non-vision tokens only
-
-Val AUC per arm, the lift over `ego` with a clip-grouped paired bootstrap 95% CI,
-and the same on the "cause visible at t0" subset from 05n (positives whose cause
-05n judged visible, all negatives). Mean over --seeds.
-
-  decodable, lift clearly > 0  -> the cue is in the context; the head does not use it
-                                  (training signal problem: DiffGRPO / conditioning)
-  lift ~ 0                     -> the cue does not reach the context (perception /
-                                  temporal context problem: unfreeze projector, more frames)
-
-    python scripts/05o_ctx_probe_fit.py --layer 18
-"""
+"""Fit probes for whether near-term depart/brake is decodable from the flow head's context."""
 from __future__ import annotations
 import argparse
 import json
@@ -104,7 +78,7 @@ def fit(arm, Xtr, Vtr, Etr, ytr, clips_tr, Xva, Vva, Eva, seed, epochs=25, dev="
     torch.manual_seed(seed)
     rng = np.random.default_rng(seed)
     uc = np.array(sorted(set(clips_tr)))
-    hold = set(rng.choice(uc, size=max(1, len(uc) // 7), replace=False))   # early-stopping clips
+    hold = set(rng.choice(uc, size=max(1, len(uc) // 7), replace=False))
     ih = np.array([c in hold for c in clips_tr])
     it, iv = np.where(~ih)[0], np.where(ih)[0]
     mu, sd = Etr[it].mean(0), Etr[it].std(0) + 1e-3
@@ -162,7 +136,7 @@ def main() -> int:
     ap.add_argument("--seeds", type=int, default=3)
     ap.add_argument("--cue", default="runs/coc_probe/cue_visibility_val.json")
     ap.add_argument("--root", default=str(ROOT))
-    ap.add_argument("--train-split", default="train", help="smoke: val")
+    ap.add_argument("--train-split", default="train", help="e.g. val")
     ap.add_argument("--epochs", type=int, default=25)
     ap.add_argument("--out", default=None)
     a = ap.parse_args()
@@ -172,9 +146,9 @@ def main() -> int:
         Wtr, Xtr, Vtr, Etr, ytr = load(a.train_split, a.layer, task, a.root)
         Wva, Xva, Vva, Eva, yva = load("val", a.layer, task, a.root)
         ctr, cva = [w["clip"] for w in Wtr], [w["clip"] for w in Wva]
-        Xtr, Vtr, Xva, Vva = Xtr.cuda(), Vtr.cuda(), Xva.cuda(), Vva.cuda()   # ~4 GB fp16: one copy, not per batch
+        Xtr, Vtr, Xva, Vva = Xtr.cuda(), Vtr.cuda(), Xva.cuda(), Vva.cuda()
         yv = yva.numpy()
-        # "cause visible" subset: negatives + positives whose 05n cause is visible at t0
+        # negatives + positives whose cause is visible at t0
         vis_ok = np.array([yv[i] == 0 or bool(cue.get((w["clip"], w["window"]), {}).get("vis"))
                            for i, w in enumerate(Wva)])
         print(f"\n== {task}  layer {a.layer}: train {len(Wtr)} ({int(ytr.sum())} pos), "

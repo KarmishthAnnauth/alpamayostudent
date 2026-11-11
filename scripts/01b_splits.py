@@ -1,14 +1,4 @@
-"""Write the train / val / challenging splits over a curated increment.
-
-Nothing wrote `split_*.json` before 2026-08-24, and stage 1 reads two of them:
-`split_train.json` for its training shards and `split_challenging.json` for the
-epoch gate. A run without them dies at the first eval, hours in.
-
-    python scripts/01b_splits.py --n 500
-
-Membership is a per-clip hash, so the splits nest exactly as the curated
-increments do (val_500 subset val_2000). Safe to re-run; it is deterministic.
-"""
+"""Write the train / val / challenging splits over a curated increment."""
 import argparse
 import json
 import sys

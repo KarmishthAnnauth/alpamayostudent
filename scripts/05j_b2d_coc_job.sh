@@ -1,6 +1,5 @@
 #!/bin/bash
-# Step 2+3 prerequisites on the Blackwell: open-loop sanity of the flow
-# evaluator on the untrained init (2 min), then the full CoC cache.
+# Flow evaluator sanity check on the untrained init, then build the CoC cache.
 #SBATCH --job-name=a2e-b2d-coc
 #SBATCH --partition=main
 #SBATCH --gres=gpu:rtxpro6000:1

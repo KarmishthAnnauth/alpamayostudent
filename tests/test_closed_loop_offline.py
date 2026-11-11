@@ -1,21 +1,4 @@
-"""Closed-loop agent geometry (`closed_loop/a2e_common.py`), CPU only, no CARLA.
-
-What is pinned here and why:
-
-  - the constants the agent duplicates (it cannot import `distill`, which needs
-    torch) equal `data/bench2drive.py`'s;
-  - the dead-reckoned ego history equals the training windows' history
-    (`bench2drive.relative_poses` at the rear axle) on a real clip, fed only
-    what the leaderboard gives an agent: speedometer and compass. A sign or
-    frame error here hands the flow head a mirrored or drifting history and
-    nothing but a bad driving score would show it;
-  - a plan re-expressed after the ego moved lands where it was;
-  - the controller frame: a plan curving LEFT must steer NEGATIVE (CARLA steer
-    > 0 is a right turn), a stopped plan brakes;
-  - the geo-reference solve inverts the leaderboard's own GPS formula;
-  - the route-hint lookahead reproduces `route_command(rule="horizon")`;
-  - the wire format round-trips arrays and text.
-"""
+"""Closed-loop agent geometry, wire format and controller (CPU, no CARLA)."""
 from __future__ import annotations
 
 import math
@@ -45,7 +28,7 @@ def test_wire_roundtrip():
 
 @pytest.mark.parametrize("lat_ref,lon_ref", [(0.0, 0.0), (42.0, 2.0), (49.0, 8.0)])
 def test_geo_reference(lat_ref, lon_ref):
-    # the leaderboard's forward map (route_manipulation._location_to_gps)
+    # leaderboard's forward GPS map
     def to_gps(x, y):
         s = math.cos(math.radians(lat_ref))
         mx = s * lon_ref * math.pi * cm.EARTH_RADIUS_EQUA / 180.0 + x
@@ -92,7 +75,7 @@ def test_controller_frame_and_speed():
 
 def test_plan_reexpressed_after_motion():
     tr = cm.PoseTracker()
-    yaw_rate, v = 0.3, 6.0                       # rad/s to the RIGHT in CARLA (yaw grows), m/s
+    yaw_rate, v = 0.3, 6.0                       # turning right in CARLA
     for k in range(41):
         tr.update(v, math.pi / 2 + yaw_rate * k / cm.SIM_HZ)
     # a world-fixed point 10 m ahead and 2 m LEFT of the pose 20 ticks ago
@@ -100,7 +83,7 @@ def test_plan_reexpressed_after_motion():
     p_now = tr.to_current(p_old, 20)
     # the car advanced ~6 m and turned right by 0.3 rad: the point is nearer and further left
     assert p_now[0, 0] < 10.0 - 4.0 and p_now[0, 1] > 2.0
-    # and the inverse composition is consistent: zero motion is the identity
+    # zero motion is the identity
     np.testing.assert_allclose(tr.to_current(p_old, 0), p_old)
     still = cm.PoseTracker()
     for _ in range(30):
@@ -123,8 +106,6 @@ def test_route_hint_lookahead():
     assert cm.hint_command(5) == "straight" and cm.hint_command(2) == "turn_right"
 
 
-# ---- against the training pipeline ------------------------------------------
-
 def test_constants_match_training():
     pytest.importorskip("torch")
     from distill.data import bench2drive as b2d
@@ -142,8 +123,7 @@ def test_constants_match_training():
 
 
 def test_history_matches_training_window():
-    """Speedometer + compass, as the agent sees them, against the cached
-    windows' ego history on real clips."""
+    """Dead-reckoned history matches the training windows on real clips."""
     pytest.importorskip("torch")
     pytest.importorskip("cv2")
     from distill.data import bench2drive as b2d
@@ -168,8 +148,6 @@ def test_history_matches_training_window():
             errs.append(np.abs(xyz[:, :2] - ref_xyz[:, :2]).max())
             yaws.append(np.abs(b2d.yaw_of(rot.astype(np.float64)) - b2d.yaw_of(ref_rot)).max())
     errs, yaws = np.array(errs), np.array(yaws)
-    # 1.5 s of history at up to ~15 m/s: dead reckoning at 10 Hz stays within
-    # the action space's own round-trip floor (p90 0.50 m at 6.4 s, P2-11)
     assert np.median(errs) < 0.10, (np.median(errs), errs.max())
     assert np.percentile(errs, 95) < 0.40, (np.percentile(errs, 95), errs.max())
     assert yaws.max() < 1e-3

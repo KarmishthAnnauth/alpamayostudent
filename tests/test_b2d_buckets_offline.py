@@ -1,9 +1,4 @@
-"""Bucketed sampling (`data/b2d_buckets.py`), CPU only.
-
-Pins: the bucket rules on synthetic windows (priority order included), that the
-sampler draws each bucket with its configured share, and that a config typo or a
-stale bucket table raises instead of silently reverting to uniform sampling.
-"""
+"""Bucketed sampling (`data/b2d_buckets.py`), CPU only."""
 from __future__ import annotations
 
 import sys
@@ -37,7 +32,6 @@ def test_bucket_rules():
     assert _bucket(np.full(64, 5.0), 5.0, lat_end=6.0) == "turn"
     assert _bucket(3.0 + 1.5 * T, 3.0) == "accel"
     assert _bucket(np.full(64, 7.0), 7.0) == "cruise"
-    # creeping from standstill (never above 2 m/s) is neither standing nor a start
     assert _bucket(np.full(64, 1.0), 0.0) == "cruise"
 
 
@@ -50,7 +44,6 @@ def test_sampling_weights_hit_the_shares():
     draw = Counter(np.array(buckets)[rng.choice(len(buckets), size=40000, p=w)])
     for b, s in share.items():
         assert abs(draw[b] / 40000 - s) < 0.01
-    # shares are renormalised over the buckets that occur
     w2 = bk.sampling_weights(["standing", "start", "start"], {"standing": 0.1, "start": 0.3, "turn": 0.6})
     np.testing.assert_allclose(w2, [0.25, 0.375, 0.375])
     with pytest.raises(ValueError):

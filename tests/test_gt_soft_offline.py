@@ -1,13 +1,4 @@
-"""Run-4 trajectory supervision: the distance-aware GT anchor and the GT-CE ramp.
-
-Three things here fail silently rather than loudly. The soft target has to stay
-a proper distribution at the edges of the 3000-bin future region (otherwise it
-leaks mass onto the history bins that sit immediately above it, and the loss
-quietly stops being a cross-entropy). Its gradient has to reach the bins AROUND
-the GT bin, not just the GT bin — that, and not any change in the loss value, is
-what the term is for. And the weight ramp now runs UPWARD, which the old
-`gt_ce_min` name implied it did not.
-"""
+"""Distance-aware soft GT trajectory CE and the GT-CE weight ramp."""
 import sys
 from pathlib import Path
 
@@ -18,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from distill import losses  # noqa: E402
 from distill.config import Cfg  # noqa: E402
 
-LO, HI = 100, 3100          # a stand-in future region: future_base .. +3000
+LO, HI = 100, 3100
 
 
 def _logits(B, T, V, peak_bin, sharpness=12.0):
@@ -39,17 +30,7 @@ def test_soft_target_prefers_a_near_miss_to_a_far_miss():
 
 
 def test_soft_target_spreads_the_gradient_over_the_neighbourhood():
-    """The mechanism, not the loss value.
-
-    On a Gaussian student the two terms separate a near miss from a far miss by
-    the SAME amount — smoothing the target does not amplify the value gap, and
-    it was never supposed to. What it changes is where the gradient goes: the
-    one-hot term pushes probability onto exactly one bin in 3000 per position,
-    so a single GT sample per context says nothing about the local shape and the
-    model has to average many samples to recover it. That is the variance job
-    243 was paying (`gt_ce` flat at ~6.0 nats for 8 epochs). The soft target
-    supplies the local shape on every sample.
-    """
+    """Soft target spreads the gradient over neighbouring bins."""
     V, gt = 3400, 1500
     mask = torch.ones(1, 1, dtype=torch.bool)
     tgt = torch.full((1, 1), gt)
@@ -57,7 +38,6 @@ def test_soft_target_spreads_the_gradient_over_the_neighbourhood():
     def pulled_bins(fn):
         x = _logits(1, 1, V, gt + 30).clone().requires_grad_(True)
         fn(x).backward()
-        # Negative grad on a logit = the loss wants that bin's probability up.
         return int((x.grad[0, 0] < -1e-9).sum())
 
     soft = pulled_bins(lambda x: losses.gt_traj_soft_ce(x, tgt, mask, 6.0, LO, HI))
@@ -67,9 +47,7 @@ def test_soft_target_spreads_the_gradient_over_the_neighbourhood():
 
 
 def test_soft_target_renormalises_at_the_region_edge():
-    """A GT bin one off the bottom of the region: half the Gaussian's support is
-    out of range, and the in-range half must still sum to 1 — i.e. the loss must
-    match what the same student scores under an explicitly truncated target."""
+    """Near the region edge the truncated Gaussian target is renormalised."""
     V, gt = 3400, LO + 1
     mask = torch.ones(1, 1, dtype=torch.bool)
     tgt = torch.full((1, 1), gt)
@@ -113,25 +91,20 @@ def test_gt_ce_weight_ramps_upward_and_reaches_its_endpoint():
     w1 = losses.stage_weights(cfg, 100, 100)["gt_ce"]
     assert w0 == pytest.approx(0.5) and w1 == pytest.approx(1.5)
     assert wm == pytest.approx(1.0)
-    # The per-dim teacher weights are static — nothing should be annealing them.
     for step in (0, 50, 100):
         w = losses.stage_weights(cfg, step, 100)
         assert w["traj_kl"] == 1.0 and w["traj_kl_accel"] == 0.1
 
 
 def test_legacy_gt_ce_min_key_still_ramps_downward():
-    """Runs 1-3 configs must keep reproducing. `gt_ce_min` is the old name."""
+    """Legacy `gt_ce_min` key still ramps downward."""
     cfg = Cfg({"loss_weights": {"gt_ce": 0.25}, "gt_ce_min": 0.06})
     assert losses.stage_weights(cfg, 0, 100)["gt_ce"] == pytest.approx(0.25)
     assert losses.stage_weights(cfg, 100, 100)["gt_ce"] == pytest.approx(0.06)
 
 
 def test_split_reduction_matches_two_full_calls():
-    """The per-position refactor must not change the numbers it replaced.
-
-    Run 4 reduces one forward under two masks instead of calling `traj_topk_kl`
-    twice; if those disagree, the split silently retunes both weights.
-    """
+    """Per-position KL reduces to the same values as the full call."""
     B, L, V, K = 2, 8, 60, 5
     torch.manual_seed(0)
     logits = torch.randn(B, L, V)
@@ -147,12 +120,11 @@ def test_split_reduction_matches_two_full_calls():
 
 
 def test_even_odd_masks_partition_the_trajectory_positions():
-    """Every valid position lands in exactly one half — a parity slip would put
-    the accel weight on curvature and leave half the stream unsupervised."""
+    """Every valid position lands in exactly one of the even/odd halves."""
     mask = torch.tensor([[True] * 6 + [False] * 2, [True] * 8])
     dim0 = torch.zeros_like(mask); dim0[:, 0::2] = True
     curv, acc = mask & dim0, mask & ~dim0
-    assert not (curv & acc).any()                 # disjoint
-    assert ((curv | acc) == mask).all()           # and covering
+    assert not (curv & acc).any()
+    assert ((curv | acc) == mask).all()
     assert int(curv.sum()) == 7 and int(acc.sum()) == 7
-    assert curv[0, 0] and acc[0, 1]               # position 0 is curvature
+    assert curv[0, 0] and acc[0, 1]

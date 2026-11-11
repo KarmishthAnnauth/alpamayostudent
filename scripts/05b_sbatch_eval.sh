@@ -1,9 +1,6 @@
 #!/bin/bash
-# Score a checkpoint (merged, or init + adapters) on the Blackwell via SLURM,
-# for when the Ada is taken. ~10 min for 500 val + 500 train windows.
-#
-#     INIT=<merged ckpt> [AD=<adapters dir>] TAG=<name> [ROUTE=1] sbatch scripts/05b_sbatch_eval.sh
-#
+# Score a checkpoint (merged, or init + adapters) via SLURM.
+# Usage: INIT=<ckpt> [AD=<adapters>] TAG=<name> [ROUTE=1] sbatch scripts/05b_sbatch_eval.sh
 #SBATCH --job-name=a2e-eval-coc
 #SBATCH --partition=main
 #SBATCH --gres=gpu:rtxpro6000:1

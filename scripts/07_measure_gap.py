@@ -1,29 +1,9 @@
-"""Measure the headroom: Alpamayo 1.5 vs zero-shot Cosmos 3 Edge, same clips.
+"""Measure ADE headroom: Alpamayo 1.5 teacher vs zero-shot Cosmos 3 Edge on the same clips.
 
-Run this BEFORE the big labeling run and before any training. Everything the
-distillation can achieve lives between these two ADE numbers, and if the gap is
-narrow you want to change the intervention (LoRA rank, targets, data scale) —
-not discover the ceiling six epochs in.
-
-    # 1. GATE: does our 9-D "av" action decode actually work?
     python scripts/07_measure_gap.py calibrate --clips 5
-
-    # 2. the two numbers (separate processes: the models never coexist)
     python scripts/07_measure_gap.py teacher --clips 50
     python scripts/07_measure_gap.py edge    --clips 50
-
-    # 3. the comparison
     python scripts/07_measure_gap.py report
-
-Step 1 is not optional. Cosmos 3 ships the "av" embodiment (domain id 1, 9-D
-actions) but no AV action dataset, so the 9-D layout is inferred by analogy —
-see `av_actions_to_xyz`. Inverse dynamics on the window's own past is a known
-answer, so a bad decode shows up there in minutes instead of poisoning the
-headline number. Rule of thumb: sub-metre mean ADE means the decode is sane;
-several metres means stop and fix it.
-
-Both phases score the SAME windows of the SAME split, because a gap measured on
-different clips is not a gap.
 """
 import argparse, json, logging, sys
 from pathlib import Path
@@ -53,7 +33,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 cfg = load_config(a.config)
 out = Path(a.out or (Path(cfg.paths.runs_root) / "gap"))
 out.mkdir(parents=True, exist_ok=True)
-horizon_steps = int(round(cfg.eval.horizon_s * 10))     # 6.4 s @ 10 Hz -> 64
+horizon_steps = int(round(cfg.eval.horizon_s * 10))     # 10 Hz
 
 if a.phase == "report":
     t_file, e_file = out / "teacher.npz", out / "edge.npz"
@@ -72,13 +52,7 @@ if a.phase == "report":
     sys.exit(0)
 
 def resolve_clips():
-    """Explicit list > split file > the raw clip index.
-
-    NOTE nothing writes `split_*.json` yet — `01_curate.py` produces
-    `curated_<n>.json` — so the split branch stays dormant until splits are
-    built. The clip-index fallback is fine for a headroom measurement: neither
-    model is being trained here, so an unbiased sample is what you want.
-    """
+    """Explicit list > split file > the raw clip index."""
     if a.clips_file:
         ids = json.loads(Path(a.clips_file).read_text())
         print(f"clips: {len(ids)} from {a.clips_file}")

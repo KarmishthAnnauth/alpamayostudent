@@ -1,32 +1,4 @@
-"""Closed-loop Bench2Drive: everything the agent and the model server share.
-
-numpy + stdlib ONLY. The leaderboard agent (`a2e_agent.py`) runs inside the
-evaluator's interpreter (python 3.10, `carla` 0.9.15, no torch); the student
-needs python 3.13 / torch 2.10 and there is no `carla` wheel for it. So the
-model lives in its own process (`server.py`) and this module is the contract
-between the two: the wire format, and the geometry that turns leaderboard
-sensors into the window the flow head was trained on (`data/bench2drive.py`).
-
-Imported as `distill.closed_loop.a2e_common` by the server and as a bare
-`a2e_common` by the agent (the evaluator puts the agent's directory on sys.path).
-
-WINDOW (must match `bench2drive.build_window`):
-  ego frame        x forward, +y LEFT, origin at the REAR AXLE (actor origin moved
-                   back 1.25 m), identity at t0.
-  ego history      16 poses at 10 Hz, t0-1.5 s .. t0.
-  frames           4 per camera at t0-0.3 s .. t0, 0.1 s apart, 360x640 RGB; the
-                   tele slot is the 30-deg centre crop of the front camera.
-  route hint       first route command other than LANEFOLLOW inside the 6.4 s
-                   horizon, else the command at t0 (`route_rule="horizon"`).
-
-POSE. The leaderboard's GNSS carries 5e-6 deg of noise per axis (agent_wrapper.py
-:209-211, ~0.5 m), which is five times the 0.1 m a 1 m/s ego moves between two
-history steps, so the history is NOT differenced GPS. It is dead-reckoned from
-the speedometer and the IMU compass, both noise-free: the unicycle the action
-space assumes (velocity along the heading) holds at the rear axle, which is the
-training reference point. GPS is used only for route progress, where 0.5 m is
-irrelevant (the planner's pop radius is 4 m).
-"""
+"""Shared wire format, geometry and control for the closed-loop agent and model server (numpy + stdlib only)."""
 from __future__ import annotations
 
 import json
@@ -37,13 +9,11 @@ from collections import deque
 
 import numpy as np
 
-# ---- constants (mirrors of data/bench2drive.py; tests pin them together) ----
-
 N_HISTORY = 16
 N_FUTURE = 64
-DT = 0.1                         # s, trajectory / history grid
-SIM_HZ = 20                      # leaderboard fixed_delta_seconds = 0.05
-TICKS_PER_STEP = int(round(SIM_HZ * DT))      # 2 sim ticks per 0.1 s
+DT = 0.1                         # s
+SIM_HZ = 20
+TICKS_PER_STEP = int(round(SIM_HZ * DT))
 N_FRAMES = 4
 STUDENT_HW = (360, 640)
 IMG_W, IMG_H = 1600, 900
@@ -52,33 +22,24 @@ TELE_FOV_DEG = 30.0
 REAR_AXLE_OFFSET_M = 1.25
 
 TELE_SLOT = "camera_front_tele_30fov"
-#: student camera slot -> leaderboard sensor id
 SLOT_SENSOR = {
     "camera_cross_left_120fov": "CAM_FRONT_LEFT",
     "camera_front_wide_120fov": "CAM_FRONT",
     "camera_cross_right_120fov": "CAM_FRONT_RIGHT",
     TELE_SLOT: "CAM_FRONT",
 }
-#: The Bench2Drive data-collection rig (the dataset's rgb_front / front_left /
-#: front_right), same values every Bench2DriveZoo agent uses.
 CAMERA_RIG = {
     "CAM_FRONT":       dict(x=0.80, y=0.0, z=1.60, yaw=0.0),
     "CAM_FRONT_LEFT":  dict(x=0.27, y=-0.55, z=1.60, yaw=-55.0),
     "CAM_FRONT_RIGHT": dict(x=0.27, y=0.55, z=1.60, yaw=55.0),
 }
 CAMERA_FOV = 70
-#: GNSS/IMU mount, Bench2DriveZoo's: 1.4 m behind the actor origin.
 GPS_X = -1.4
 
 LANEFOLLOW = 4
-HINT_LEFT, HINT_RIGHT = 1, 2     # RoadOption values that change the hint
+HINT_LEFT, HINT_RIGHT = 1, 2
 EARTH_RADIUS_EQUA = 6378137.0
 
-
-# ---- wire -------------------------------------------------------------------
-# One message = 4-byte big-endian header length, a JSON header, then the raw
-# bytes of every array the header lists. Not pickle: the two ends run different
-# python and numpy majors.
 
 def send_msg(sock: socket.socket, fields: dict) -> None:
     meta, arrays, blobs = {}, [], []
@@ -121,11 +82,8 @@ def connect(path: str, timeout: float | None = None) -> socket.socket:
     return s
 
 
-# ---- GPS -> metres ----------------------------------------------------------
-
 def gps_to_location(lat: float, lon: float, lat_ref: float, lon_ref: float) -> np.ndarray:
-    """Inverse of the leaderboard's `_location_to_gps` (route_manipulation.py):
-    CARLA world (x, y) of a GNSS reading."""
+    """GNSS reading -> CARLA world (x, y)."""
     scale = math.cos(lat_ref * math.pi / 180.0)
     my = math.log(math.tan((lat + 90.0) * math.pi / 360.0)) * (EARTH_RADIUS_EQUA * scale)
     mx = lon * (math.pi * EARTH_RADIUS_EQUA * scale) / 180.0
@@ -135,19 +93,12 @@ def gps_to_location(lat: float, lon: float, lat_ref: float, lon_ref: float) -> n
 
 
 def solve_latlon_ref(lat: float, lon: float, x: float, y: float) -> tuple[float, float]:
-    """The map's geo-reference from ONE route point known in both frames.
-
-    The reference differs per town and a wrong one rescales every distance by
-    cos(lat_ref) (26% at the old hardcoded 42 deg). Bench2DriveZoo agents solve
-    the same two equations with scipy's fsolve; the evaluator's env has no
-    scipy, and the system reduces to one unknown: for a given lat_ref the y
-    equation is monotone, and lon_ref then follows in closed form.
-    """
+    """Solve the map's geo-reference from one route point known in both frames."""
     def g(lat_ref):
         s = math.cos(math.radians(lat_ref))
         return (s * EARTH_RADIUS_EQUA * (math.log(math.tan(math.radians(90.0 + lat_ref) / 2.0))
                                          - math.log(math.tan(math.radians(90.0 + lat) / 2.0))) - y)
-    lo, hi = lat - 1.0, lat + 1.0               # 1 deg = 111 km; no CARLA map is that large
+    lo, hi = lat - 1.0, lat + 1.0
     glo, ghi = g(lo), g(hi)
     if glo * ghi > 0:
         raise ValueError(f"no geo-reference within 1 deg of lat {lat} for y={y}")
@@ -164,12 +115,8 @@ def solve_latlon_ref(lat: float, lon: float, x: float, y: float) -> tuple[float,
     return lat_ref, lon_ref
 
 
-# ---- route ------------------------------------------------------------------
-
 class RoutePlanner:
-    """Bench2DriveZoo's `team_code/planner.py::RoutePlanner.run_step`, same pop
-    rule (so `command_near` means what it meant when the dataset was recorded),
-    without the debug plotter. `route` is a deque of (xy, command int)."""
+    """Route waypoint popper matching Bench2DriveZoo's RoutePlanner."""
 
     def __init__(self, min_distance: float = 4.0, max_distance: float = 50.0):
         self.route: deque = deque()
@@ -198,9 +145,7 @@ class RoutePlanner:
         return self.route[0], self.route[1]
 
     def command_ahead(self, lookahead_m: float) -> int:
-        """`bench2drive.route_command(rule="horizon")` without the future: the
-        first command other than LANEFOLLOW on the route within `lookahead_m`
-        of the near target, else the near command."""
+        """First non-LANEFOLLOW command within `lookahead_m`, else the near command."""
         near = self.route[1] if len(self.route) > 1 else self.route[0]
         if near[1] not in (LANEFOLLOW, -1):
             return near[1]
@@ -215,35 +160,30 @@ class RoutePlanner:
 
 
 def hint_command(cmd: int) -> str:
-    """RoadOption -> the key the server maps onto the phase-1 hint strings."""
+    """RoadOption -> route hint key."""
     return {HINT_LEFT: "turn_left", HINT_RIGHT: "turn_right"}.get(int(cmd), "straight")
 
 
-# ---- pose -------------------------------------------------------------------
-
 def compass_to_yaw(compass: float) -> float:
-    """IMU compass (0 = north = CARLA -y, clockwise) -> CARLA yaw (rad, from +x
-    towards +y)."""
+    """IMU compass -> CARLA yaw (rad)."""
     return float(compass) - math.pi / 2.0
 
 
 class PoseTracker:
-    """Dead-reckoned rear-axle pose in a CARLA-handed local frame, one entry per
-    sim tick. `history()` returns the 16-step ego history of the training
-    windows, in the ego frame at the latest tick."""
+    """Dead-reckoned rear-axle pose from speed and compass, one entry per sim tick."""
 
     def __init__(self, sim_hz: int = SIM_HZ, keep_s: float = 12.0):
         self.dt = 1.0 / sim_hz
         self.stride = int(round(sim_hz * DT))
-        self.poses: deque = deque(maxlen=int(keep_s * sim_hz))    # (x, y, yaw)
+        self.poses: deque = deque(maxlen=int(keep_s * sim_hz))
         self._xy = np.zeros(2)
-        self._last = None                                          # (speed, yaw)
+        self._last = None
 
     def update(self, speed: float, compass: float) -> None:
         yaw = compass_to_yaw(compass)
         if self._last is not None:
             v0, y0 = self._last
-            # trapezoid over the tick: mean speed along the mean heading
+            # trapezoid: mean speed along mean heading
             dyaw = math.atan2(math.sin(yaw - y0), math.cos(yaw - y0))
             ym = y0 + 0.5 * dyaw
             self._xy = self._xy + 0.5 * (v0 + speed) * self.dt * np.array([math.cos(ym), math.sin(ym)])
@@ -254,9 +194,7 @@ class PoseTracker:
         return self.poses[max(len(self.poses) - 1 - ticks_ago, 0)]
 
     def history(self) -> tuple[np.ndarray, np.ndarray]:
-        """(xyz (16,3), rot (16,3,3)) f32: poses at t0-1.5 s..t0 in the ego frame
-        at t0 (x fwd, +y left). Before 1.5 s of driving the oldest pose is
-        repeated, i.e. the ego is taken to have stood there."""
+        """Ego history (xyz (16,3), rot (16,3,3)) in the current ego frame."""
         x0, y0, yaw0 = self.pose(0)
         c, s = math.cos(yaw0), math.sin(yaw0)
         xyz = np.zeros((N_HISTORY, 3), dtype=np.float32)
@@ -275,8 +213,7 @@ class PoseTracker:
         return xyz, rot
 
     def to_current(self, xy_ego: np.ndarray, ticks_ago: int) -> np.ndarray:
-        """Points given in the ego frame of `ticks_ago` (x fwd, y left) ->
-        the ego frame of the latest tick."""
+        """Ego-frame points from `ticks_ago` -> current ego frame."""
         if ticks_ago <= 0:
             return np.asarray(xy_ego, dtype=np.float64)
         xp, yp, yawp = self.pose(ticks_ago)
@@ -291,11 +228,9 @@ class PoseTracker:
         return np.stack([c * dx + s * dy, -(-s * dx + c * dy)], axis=1)
 
 
-# ---- frames -----------------------------------------------------------------
-
 def tele_crop_box(f_px: float = FOCAL_PX, fov_deg: float = TELE_FOV_DEG,
                   w: int = IMG_W, h: int = IMG_H) -> tuple[int, int, int, int]:
-    """`bench2drive.tele_crop_box`: the 30-deg centre crop of the front camera."""
+    """Centre crop box emulating the 30-deg tele camera."""
     half_w = f_px * math.tan(math.radians(fov_deg / 2.0))
     crop_w = int(round(2 * half_w))
     crop_h = int(round(crop_w * h / w))
@@ -304,10 +239,7 @@ def tele_crop_box(f_px: float = FOCAL_PX, fov_deg: float = TELE_FOV_DEG,
 
 
 def student_frame(bgra: np.ndarray, slot: str, jpeg_quality: int | None = 92) -> np.ndarray:
-    """A leaderboard camera image (H, W, 4 BGRA) -> the (360, 640, 3) RGB frame of
-    `slot`, through the training pipeline's own steps: the dataset stored JPEGs,
-    `_FrameReader.student` cropped/resized them with INTER_AREA, and the cache
-    re-encoded at quality 92 (`frames.save_window_input`)."""
+    """BGRA camera image -> (360, 640, 3) RGB student frame for `slot`."""
     import cv2
     img = bgra[:, :, :3]
     if slot == TELE_SLOT:
@@ -322,8 +254,7 @@ def student_frame(bgra: np.ndarray, slot: str, jpeg_quality: int | None = 92) ->
 
 
 class FrameBuffer:
-    """Student-resolution frames of the last ticks; `window()` returns the 4
-    frames per slot at t0-0.3 s..t0. Early ticks repeat the oldest frame."""
+    """Rolling buffer of student frames; `window()` returns 4 frames per slot."""
 
     def __init__(self, slots, sim_hz: int = SIM_HZ, n_frames: int = N_FRAMES):
         self.slots = list(slots)
@@ -345,14 +276,9 @@ class FrameBuffer:
         return out
 
 
-# ---- control ----------------------------------------------------------------
-
 def controller_waypoints(traj_xy: np.ndarray, elapsed_s: float = 0.0,
                          n: int = 6, step_s: float = 0.5) -> np.ndarray:
-    """The 10 Hz plan (64 x (x fwd, y left), point i at (i+1)*0.1 s after the
-    plan was made, ALREADY expressed in the current ego frame) -> the 2 Hz
-    waypoints the Bench2DriveZoo PID expects: (n, 2) as (right, forward) at
-    0.5 s, 1.0 s, ... from NOW, i.e. `elapsed_s` further along the plan."""
+    """10 Hz plan -> 2 Hz (right, forward) waypoints for the PID controller."""
     t_plan = (np.arange(traj_xy.shape[0]) + 1) * DT
     t_plan = np.concatenate([[0.0], t_plan])
     pts = np.concatenate([np.zeros((1, 2)), np.asarray(traj_xy, dtype=np.float64)])
@@ -375,10 +301,7 @@ class _PID:
 
 
 class PIDController:
-    """Bench2DriveZoo's `team_code/pid_controller.py` (the controller behind the
-    published UniAD / VAD / ORION numbers), same gains and same rules:
-    desired speed from the first two 2 Hz waypoints, steering towards the
-    waypoint nearest `aim_dist`, brake when the plan is slower than the car."""
+    """Bench2DriveZoo's PID controller."""
 
     def __init__(self, turn=(1.1, 0.5, 0.4, 40), speed=(5.0, 0.5, 1.0, 40),
                  max_throttle: float = 0.75, brake_speed: float = 0.05,
@@ -389,8 +312,7 @@ class PIDController:
         self.brake_ratio, self.clip_delta, self.aim_dist = brake_ratio, clip_delta, aim_dist
 
     def control_pid(self, waypoints: np.ndarray, speed: float):
-        """`waypoints` (n, 2) as (right, forward) metres. Returns
-        (steer, throttle, brake, metadata)."""
+        """Returns (steer, throttle, brake, metadata)."""
         wp = np.asarray(waypoints, dtype=np.float64)
         desired_speed = (0.75 * np.linalg.norm(wp[0]) * 2.0
                          + 0.25 * np.linalg.norm(wp[1] - wp[0]) * 2.0)
@@ -400,7 +322,6 @@ class PIDController:
                 norm = np.linalg.norm(cand)
                 if abs(self.aim_dist - best) > abs(self.aim_dist - norm):
                     aim, best = cand, norm
-        # aim[1] is the FORWARD component; no steering off a plan that stands still
         angle = 0.0 if aim[1] <= 0.02 else math.degrees(math.pi / 2 - math.atan2(aim[1], aim[0])) / 90.0
         steer = float(np.clip(self.turn_controller.step(angle), -1.0, 1.0))
 
