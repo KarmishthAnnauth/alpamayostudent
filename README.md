@@ -1,5 +1,12 @@
 # alpamayo2edge
 
+## Setup
+
+The teacher and the student need different torch versions, so there are two environments: one for labelling with the teacher, and one for training and evaluating the student. Each file lists its install steps at the top.
+
+- `requirements-label.txt`: Python 3.12, torch 2.8, for generating the labelled cache
+- `requirements-train.txt`: Python 3.13, torch 2.10, for phases 1, 1.5 and 2 and evaluation
+
 ## Generating the labelled cache from PhysicalAI-AV
 
 Curates clips from NVIDIA's PhysicalAI-AV dataset and labels them with the Alpamayo 1.5 teacher, producing the cache that phase 1 and phase 1.5 train on.

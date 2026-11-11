@@ -1,0 +1,23 @@
+# Labelling environment (teacher, Alpamayo 1.5): Python 3.12, CUDA 12.
+# The teacher needs these exact torch/transformers versions.
+#
+#   uv venv --python 3.12 .venv-label && source .venv-label/bin/activate
+#   uv pip install -r requirements-label.txt
+#   uv pip install --no-deps git+https://github.com/NVlabs/alpamayo1.5
+#   uv pip install --no-deps https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.8cxx11abiTRUE-cp312-cp312-linux_x86_64.whl
+
+torch==2.8.0
+torchvision>=0.23
+transformers==4.57.1
+accelerate
+huggingface_hub
+safetensors
+hydra-core
+omegaconf
+numpy
+scipy
+pyyaml
+pillow
+opencv-python-headless
+pytest
+physical_ai_av @ git+https://github.com/NVlabs/physical_ai_av@v0.2.2

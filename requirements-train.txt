@@ -1,0 +1,20 @@
+# Training and evaluation environment (student, Cosmos 3 Edge): Python 3.13, CUDA 12.8.
+#
+#   uv venv --python 3.13 .venv-train && source .venv-train/bin/activate
+#   uv pip install -r requirements-train.txt
+#   uv pip install --no-deps git+https://github.com/NVlabs/alpamayo1.5   # only to load the trajectory tokenizer spec
+
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch==2.10.0
+torchvision==0.25.0
+huggingface_hub
+safetensors
+numpy
+scipy
+scikit-learn
+pyyaml
+opencv-python-headless
+wandb
+pytest
+physical_ai_av @ git+https://github.com/NVlabs/physical_ai_av@v0.2.2
+cosmos-framework @ git+https://github.com/NVIDIA/cosmos-framework

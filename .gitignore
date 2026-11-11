@@ -7,6 +7,8 @@ __pycache__/
 *.egg-info/
 .venv/
 .venv-a2e/
+.venv-label/
+.venv-train/
 venv/
 
 # Data / model artifacts (root-level only; src/distill/data is code and stays tracked)
