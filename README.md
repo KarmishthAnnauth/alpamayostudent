@@ -1,4 +1,5 @@
 # alpamayostudent
+Distilling the reasoning capabilities of NVIDIA's Alpamayo-1.5 into Cosmos 3 Edge, to achieve a student model more suitable for deployment on an edge device.
 
 ## Setup
 
